@@ -21,7 +21,7 @@ import sqlite3
 import struct
 import logging
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # suppress noisy pkg_resources deprecation warning
 import warnings
@@ -61,7 +61,7 @@ try:
 except Exception:
     PYOBJC_AVAILABLE = False
 
-# optional pathway
+# ==== PATHWAY: optional import (we make it meaningful but optional)
 PATHWAY_IMPORTED = False
 try:
     warnings.filterwarnings("ignore", message=r".*pkg_resources is deprecated as an API.*", category=UserWarning)
@@ -92,9 +92,12 @@ CLASSIFY_MODEL = os.getenv("OPENAI_CLASSIFY_MODEL", "gpt-4o-mini")
 EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 USE_PATHWAY_STREAM = os.getenv("USE_PATHWAY_STREAM", "0") == "1"
 
-INPUT_STREAM = "./input_stream.jsonl"
-DB_FILE = "./knowledge_base.db"
-LOG_FILE = "./ambient.log"
+# --- ABSOLUTE PATHS (replace the 3 relative constants with this) ---
+BASE_DIR = os.path.abspath(".")
+INPUT_STREAM = os.path.join(BASE_DIR, "input_stream.jsonl")
+DB_FILE = os.path.join(BASE_DIR, "knowledge_base.db")
+LOG_FILE = os.path.join(BASE_DIR, "ambient.log")
+
 
 # Logging
 logging.basicConfig(filename=LOG_FILE, level=logging.DEBUG,
@@ -128,11 +131,12 @@ def init_db_and_migrate():
             tags TEXT,
             entities TEXT,
             embedding BLOB,
-            related TEXT
+            related TEXT,
+            summary TEXT
         )"""
     )
     conn.commit()
-    # Add summary column if missing
+    # Add summary column if missing (defensive)
     try:
         c.execute("PRAGMA table_info(notes)")
         cols = [r[1] for r in c.fetchall()]
@@ -148,14 +152,54 @@ db_conn = init_db_and_migrate()
 db_lock = threading.Lock()
 
 # ---------------- Helpers ----------------
+def _bootstrap_backfill_if_needed(max_lines=5000):
+    # If nothing is in SQLite yet, process existing raw captures once.
+    with db_lock:
+        c = db_conn.cursor()
+        try:
+            c.execute("SELECT COUNT(*) FROM notes")
+            count = c.fetchone()[0]
+        except Exception:
+            count = 0
+    if count > 0:
+        return 0
+
+    raw = read_raw_input_stream(limit=max_lines)
+    done = 0
+    for obj in raw:
+        try:
+            process_capture_object(obj, store=True)
+            done += 1
+        except Exception:
+            logging.exception("Backfill process failed for a raw line")
+    logging.info("Bootstrap backfill processed %d historical captures.", done)
+    return done
+
+
 def now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 def append_to_input_stream(obj: dict):
     os.makedirs(os.path.dirname(INPUT_STREAM) or ".", exist_ok=True)
-    with open(INPUT_STREAM, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    line = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+
+    # Write as bytes, then flush and fsync so Pathway's watcher sees it immediately
+    f = open(INPUT_STREAM, "ab", buffering=0)
+    try:
+        f.write(line)
+        try:
+            f.flush()
+        except Exception:
+            pass
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+    finally:
+        f.close()
+
     logging.info("Appended capture %s", obj.get("id"))
+
 
 def read_raw_input_stream(limit: int = 500) -> List[dict]:
     if not os.path.exists(INPUT_STREAM):
@@ -403,7 +447,11 @@ def fetch_note_by_id_safe(nid: str):
     return data
 
 # ---------------- Processing core ----------------
-def process_capture_object(obj: dict):
+def process_capture_object(obj: dict, *, store: bool = True) -> dict:
+    """
+    Enrich a single capture. When store=True (default), persists to SQLite.
+    Pathway pipeline calls with store=True as well; idempotency is handled by INSERT OR REPLACE.
+    """
     nid = obj.get("id") or str(uuid.uuid4())
     timestamp = obj.get("timestamp", now_iso())
     content = obj.get("content", "") or ""
@@ -428,7 +476,8 @@ def process_capture_object(obj: dict):
         "embedding": emb,
         "related": top_related
     }
-    store_enriched_note(enriched)
+    if store:
+        store_enriched_note(enriched)
     return enriched
 
 # ---------------- Pipeline: reliable polling (default) ----------------
@@ -439,9 +488,16 @@ class PipelineProcessor(threading.Thread):
         open(self.input_file, "a").close()
         self._stop = threading.Event()
         self.using_pathway_stream = False
+        self._pathway_runtime: Optional[pw.Runtime] = None  # ==== PATHWAY: keep a handle
 
     def stop(self):
         self._stop.set()
+        # ==== PATHWAY: cooperative shutdown if runtime exists
+        if PATHWAY_IMPORTED and self._pathway_runtime is not None:
+            try:
+                self._pathway_runtime.stop()
+            except Exception:
+                pass
 
     def run_polling(self):
         logging.info("Starting polling pipeline.")
@@ -467,7 +523,7 @@ class PipelineProcessor(threading.Thread):
                     except Exception:
                         obj = {"id": str(uuid.uuid4()), "timestamp": now_iso(), "content": ln}
                     try:
-                        process_capture_object(obj)
+                        process_capture_object(obj, store=True)
                     except Exception:
                         logging.exception("Error processing raw line")
             except Exception:
@@ -475,21 +531,142 @@ class PipelineProcessor(threading.Thread):
             time.sleep(1.0)
         logging.info("Polling stopped.")
 
+    # ==== PATHWAY: strongly-typed schema for safer streaming
+    def _build_pathway_schema(self):
+        class RawSchema(pw.Schema):
+            id: str
+            timestamp: str
+            content: str
+        return RawSchema
+
+    # ==== PATHWAY: streaming pipeline (opt-in)
     def run_pathway_stream(self):
         if not PATHWAY_IMPORTED or not USE_PATHWAY_STREAM:
             logging.info("Pathway stream not used.")
             return False
         try:
-            src = pw.io.fs.read(self.input_file, format="json", mode="streaming")
-            enriched_stream = src.select(enriched=pw.apply(lambda r: process_capture_object(r if isinstance(r, dict) else json.loads(r)), pw.this))
+            RawSchema = self._build_pathway_schema()
+
+            # Prefer jsonlines reader; fall back to fs.read
+            RawSchema = self._build_pathway_schema()
+
+            # Always hand Pathway the absolute path used by our writer
+            path = INPUT_STREAM  # absolute because of Patch 1
+
+            try:
+                src = pw.io.jsonlines.read(
+                    path=path,
+                    schema=RawSchema,
+                    mode="streaming",
+                    autocommit_duration_ms=200,
+                )
+            except Exception:
+                src = pw.io.fs.read(
+                    path,
+                    format="json",
+                    mode="streaming",
+                    schema=RawSchema,
+                )
+
+
+            # Normalize columns and avoid reserved 'id'
+            def _ts_key(ts: str) -> str:
+                return ts or ""
+
+            normalized = src.select(
+                note_id=pw.this.id,
+                timestamp=pw.this.timestamp,
+                content=pw.this.content,
+                ts_key=pw.apply(_ts_key, pw.this.timestamp),
+            )
+
+            # Get latest timestamp per note_id
+            latest_ts = (
+                normalized
+                .groupby(pw.this.note_id)
+                .reduce(
+                    note_id=pw.this.note_id,
+                    max_ts=pw.reducers.max(pw.this.ts_key),
+                )
+            )
+
+            # Join back to fetch content (and any other fields) for that max_ts
+            # Join back to fetch the row matching the max timestamp per note_id
+            jr = latest_ts.join(
+                normalized,
+                latest_ts.note_id == normalized.note_id
+            )
+
+            # Use pw.left / pw.right instead of *_left / *_right
+            latest_rows = (
+                jr
+                .filter(pw.left.max_ts == pw.right.ts_key)
+                .select(
+                    note_id=pw.left.note_id,
+                    timestamp=pw.left.max_ts,
+                    content=pw.right.content,
+                )
+            )
+
+
+            # Enrich each latest row by calling your existing function (writes to SQLite)
+            enriched = latest_rows.select(
+                enriched=pw.apply(
+                    lambda _nid, _ts, _c: process_capture_object(
+                        {"id": _nid, "timestamp": _ts, "content": _c},
+                        store=True
+                    ),
+                    pw.this.note_id, pw.this.timestamp, pw.this.content
+                )
+            )
+
+            # Lightweight sink for a health heartbeat
+            # --- version-agnostic heartbeat sink ---
+            class _Heartbeat:
+                def __init__(self):
+                    self.count = 0
+                def on_change(self, _table, change):
+                    added = getattr(change, "added_count", 1)
+                    try:
+                        if hasattr(change, "data"):
+                            added = len(change.data)
+                        elif hasattr(change, "added"):
+                            added = len(change.added)
+                    except Exception:
+                        pass
+                    self.count += added if isinstance(added, int) else 1
+                    if self.count % 20 == 0:
+                        logging.info("Pathway heartbeat: processed %d rows", self.count)
+
+            try:
+                hb = _Heartbeat()
+                pw.io.python.write(enriched, hb)
+            except Exception:
+                # optional: fallback to debug print if heartbeat fails
+                # pw.debug.print(enriched)
+                pass
+
+
+            # Backfill any existing raw captures into SQLite once at startup
+            try:
+                _bootstrap_backfill_if_needed(max_lines=5000)
+            except Exception:
+                logging.exception("Bootstrap backfill failed")
+
             logging.info("Starting Pathway streaming (opt-in).")
             self.using_pathway_stream = True
-            pw.run(enriched_stream)
+            try:
+                self._pathway_runtime = pw.run()
+            except TypeError:
+                self._pathway_runtime = pw.run(enriched)
+
             return True
+
         except Exception:
             logging.exception("Pathway streaming failed")
             self.using_pathway_stream = False
             return False
+
 
     def run(self):
         if PATHWAY_IMPORTED and USE_PATHWAY_STREAM:
@@ -518,7 +695,7 @@ def enrich_missing_notes(batch_sleep=0.1):
         if not note.get("summary") or note.get("summary","").strip()=="":
             need = True
         if need:
-            process_capture_object({"id": nid, "timestamp": note.get("timestamp", now_iso()), "content": note.get("content","")})
+            process_capture_object({"id": nid, "timestamp": note.get("timestamp", now_iso()), "content": note.get("content","")}, store=True)
             updated += 1
             time.sleep(batch_sleep)
     logging.info("Enrich missing done: %d updated", updated)
@@ -538,7 +715,7 @@ def recompute_links():
         if not note:
             continue
         if not note.get("embedding"):
-            process_capture_object({"id": nid, "timestamp": note.get("timestamp", now_iso()), "content": note.get("content","")})
+            process_capture_object({"id": nid, "timestamp": note.get("timestamp", now_iso()), "content": note.get("content","")}, store=True)
             time.sleep(0.05)
     all_embs = read_all_embeddings_from_db()
     emb_map = {r["id"]: r["emb"] for r in all_embs}
@@ -767,8 +944,17 @@ class AppGUI(rumps.App):
                 rumps.notification(APP_NAME, "Capture not saved", "Empty input")
                 return
             obj = {"id": str(uuid.uuid4()), "timestamp": now_iso(), "content": text}
-            append_to_input_stream(obj)
-            rumps.notification(APP_NAME, "Saved", text[:200])
+        append_to_input_stream(obj)
+
+        # --- Immediate enrich patch ---
+        threading.Thread(
+            target=lambda: process_capture_object(obj, store=True),
+            daemon=True
+        ).start()
+        # --- end patch ---
+
+        rumps.notification(APP_NAME, "Saved", text[:200])
+
 
     @rumps.clicked("Process Raw Now")
     def process_raw_now(self, _):
@@ -780,7 +966,7 @@ class AppGUI(rumps.App):
             count = 0
             for obj in raw:
                 try:
-                    process_capture_object(obj)
+                    process_capture_object(obj, store=True)
                     count += 1
                 except Exception:
                     logging.exception("Failed during Process Raw Now")
@@ -882,7 +1068,7 @@ class AppGUI(rumps.App):
                 for i, col in enumerate(cols):
                     data[col] = row[i]
                 for k in ("tags","entities","related"):
-                    if k in data and data[k]:
+                    if k in data and k in data and data[k]:
                         try:
                             data[k] = json.loads(data[k])
                         except Exception:

@@ -1,5 +1,16 @@
-/.env/
+# Ignore Python virtual environment
+venv/
+.env
 
-/venv/
-/build/
-/dist/
+# Byte-compiled / cache files
+__pycache__/
+*.pyo
+
+# Logs
+*.log
+
+# macOS metadata
+.DS_Store
+
+# SQLite DBs (if you don’t want them in Git)
+*.db
