@@ -1067,6 +1067,18 @@ if PYOBJC_AVAILABLE:
             self._summary = NSTextView.alloc().initWithFrame_(NSMakeRect(0,0,940,140))
             self._summary.setEditable_(False)
             self._summary.setRichText_(False)
+            # Ensure readable text specifically in Dark Mode (just change text color)
+            try:
+                best = self._window.effectiveAppearance().bestMatchFromAppearancesWithNames_([NSAppearanceNameDarkAqua, NSAppearanceNameAqua])
+                if best == NSAppearanceNameDarkAqua:
+                    self._summary.setTextColor_(NSColor.whiteColor())
+                else:
+                    self._summary.setTextColor_(NSColor.blackColor())
+            except Exception:
+                try:
+                    self._summary.setTextColor_(NSColor.labelColor())
+                except Exception:
+                    pass
             try:
                 self._summary.setDrawsBackground_(True)
                 self._summary.setBackgroundColor_(NSColor.textBackgroundColor())
@@ -1115,7 +1127,7 @@ if PYOBJC_AVAILABLE:
             top_stack.setSpacing_(8.0)
             try:
                 # add a slight inset so labels aren't flush left
-                top_stack.setEdgeInsets_((4.0, 12.0, 4.0, 12.0))
+                top_stack.setEdgeInsets_((4.0, 48.0, 4.0, 12.0))
             except Exception:
                 pass
             top_stack.addView_inGravity_(self._search, 1)

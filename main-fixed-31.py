@@ -1070,11 +1070,11 @@ if PYOBJC_AVAILABLE:
             try:
                 self._summary.setDrawsBackground_(True)
                 self._summary.setBackgroundColor_(NSColor.textBackgroundColor())
-                self._summary.setTextColor_(NSColor.textColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             try:
-                self._summary.setTextColor_(NSColor.labelColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             sum_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0,0,940,140))
@@ -1346,6 +1346,9 @@ class AppGUI(rumps.App):
         ]
         self.processor = PipelineProcessor(INPUT_STREAM)
         self.processor.start()
+    # Install global Option+Space hotkey for Quick Capture
+        self._install_global_hotkey()
+
     def _install_global_hotkey(self):
         """
         Global hotkey: Option + Space opens Quick Capture from anywhere.
@@ -1457,14 +1460,20 @@ class AppGUI(rumps.App):
             if not text:
                 rumps.notification(APP_NAME, "Capture not saved", "Empty input")
                 return
+            logging.info("QuickCapture: creating note")
             obj = {"id": str(uuid.uuid4()), "timestamp": now_iso(), "content": text}
             append_to_input_stream(obj)
 
             # --- Immediate enrich patch ---
-            threading.Thread(
-                target=lambda: (process_capture_object(obj, store=True), self._refresh_all_notes_ui()),
-                daemon=True
-            ).start()
+            def _save_and_refresh():
+                try:
+                    logging.info("QuickCapture: processing and storing...")
+                    process_capture_object(obj, store=True)
+                    logging.info("QuickCapture: stored; refreshing UI")
+                    self._refresh_all_notes_ui()
+                except Exception:
+                    logging.exception("QuickCapture: failed to process/store")
+            threading.Thread(target=_save_and_refresh, daemon=True).start()
             # --- end patch ---
 
             rumps.notification(APP_NAME, "Saved", text[:200])

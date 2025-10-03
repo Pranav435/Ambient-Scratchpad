@@ -1070,11 +1070,11 @@ if PYOBJC_AVAILABLE:
             try:
                 self._summary.setDrawsBackground_(True)
                 self._summary.setBackgroundColor_(NSColor.textBackgroundColor())
-                self._summary.setTextColor_(NSColor.textColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             try:
-                self._summary.setTextColor_(NSColor.labelColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             sum_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0,0,940,140))
@@ -1346,6 +1346,9 @@ class AppGUI(rumps.App):
         ]
         self.processor = PipelineProcessor(INPUT_STREAM)
         self.processor.start()
+    # Install global Option+Space hotkey for Quick Capture
+    self._install_global_hotkey()
+
     def _install_global_hotkey(self):
         """
         Global hotkey: Option + Space opens Quick Capture from anywhere.

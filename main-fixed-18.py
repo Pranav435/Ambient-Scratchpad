@@ -798,6 +798,112 @@ def show_text_window(title: str, text: str, width: int = 800, height: int = 600)
 
 # ---------- Native "Show All Notes" UI (macOS) ----------
 if PYOBJC_AVAILABLE:
+    
+    class QuickCapturePanelController(NSObject):
+        """
+        Minimal native quick-capture panel that closes on Enter and on Esc.
+        """
+        Panel = objc.lookUpClass("NSPanel")
+
+        def init(self):
+            self = objc.super(QuickCapturePanelController, self).init()
+            if self is None:
+                return None
+            self.panel = None
+            self.text_field = None
+            self.save_button = None
+            self.cancel_button = None
+            return self
+
+        def _build_ui(self):
+            if self.panel is not None:
+                return
+
+            # Create a utility panel (non-activating floating panel)
+            style =  (1 << 0) | (1 << 1) | (1 << 3)  # titled, closable, utility
+            rect = NSMakeRect(0, 0, 520, 140)
+            self.panel = QuickCapturePanelController.Panel.alloc().initWithContentRect_styleMask_backing_defer_(
+                rect, style, NSBackingStoreBuffered, False
+            )
+            self.panel.setTitle_("Quick Capture")
+            self.panel.setHidesOnDeactivate_(False)
+            self.panel.setFloatingPanel_(True)
+
+            # Background that adapts to appearance
+            try:
+                self.panel.setAppearance_(NSAppearance.appearanceNamed_("NSAppearanceNameVibrantDark"))
+            except Exception:
+                pass
+
+            content = self.panel.contentView()
+
+            # Text field - sends action on Enter
+            self.text_field = NSTextField.alloc().initWithFrame_(NSMakeRect(20, 68, 480, 28))
+            self.text_field.setPlaceholderString_("Type your thought…")
+            self.text_field.setBezeled_(True)
+            self.text_field.setBezelStyle_(2)
+            self.text_field.setEditable_(True)
+            self.text_field.setSelectable_(True)
+            self.text_field.setFocusRingType_(1)
+            self.text_field.setTarget_(self)
+            self.text_field.setAction_("save:")
+
+            # Buttons
+            self.save_button = rumps.Button(None, title="Save")
+            self.cancel_button = rumps.Button(None, title="Cancel")
+            # rumps.Button is an NSButton subclass; position manually
+            self.save_button.setFrame_(NSMakeRect(320, 20, 80, 30))
+            self.cancel_button.setFrame_(NSMakeRect(410, 20, 80, 30))
+            self.save_button.setTarget_(self)
+            self.save_button.setAction_("save:")
+            self.cancel_button.setTarget_(self)
+            self.cancel_button.setAction_("cancel:")
+
+            # Add to content view
+            content.addSubview_(self.text_field)
+            content.addSubview_(self.save_button)
+            content.addSubview_(self.cancel_button)
+
+        def show(self):
+            self._build_ui()
+            self.text_field.setStringValue_("")  # clear
+            self.panel.center()
+            self.panel.makeKeyAndOrderFront_(None)
+            NSApp.activateIgnoringOtherApps_(True)
+            self.text_field.currentEditor()  # focus
+            self.text_field.becomeFirstResponder()
+
+        # Action methods (ObjC signature requires trailing underscore)
+        def save_(self, sender):
+            text = str(self.text_field.stringValue() or "").strip()
+            if not text:
+                # Close silently on empty
+                self.panel.orderOut_(None)
+                return
+            obj = {"id": str(uuid.uuid4()), "timestamp": now_iso(), "content": text}
+            append_to_input_stream(obj)
+            # Enrich in background and refresh UI
+            threading.Thread(
+                target=lambda: (process_capture_object(obj, store=True), AppHelper.callAfter(self._notify_refresh)),
+                daemon=True
+            ).start()
+            self.panel.orderOut_(None)
+
+        def cancel_(self, sender):
+            self.panel.orderOut_(None)
+
+        def _notify_refresh(self):
+            try:
+                app = NSApp.delegate()
+            except Exception:
+                app = None
+            try:
+                # AppGUI has _refresh_all_notes_ui
+                if app and hasattr(app, "_refresh_all_notes_ui"):
+                    app._refresh_all_notes_ui()
+            except Exception:
+                pass
+
     class ShowAllNotesWindowController(NSObject):
         """
         A split-view native window:
@@ -1327,11 +1433,21 @@ Make bullet lists and keep items short (no more than 12 words each). If nothing 
 # ---------------- UI (rumps menu) ----------------
 APP_NAME = "AmbientScratchpad"
 
+
 class AppGUI(rumps.App):
     def __init__(self):
         super().__init__("✍︎", quit_button=None)
-        self.menu = [
 
+        # Hide Dock icon and keep this as a proper menu-bar utility app
+        if PYOBJC_AVAILABLE:
+            try:
+                app = NSApplication.sharedApplication()
+                # 1 == NSApplicationActivationPolicyAccessory
+                app.setActivationPolicy_(1)
+            except Exception:
+                pass
+
+        self.menu = [
             rumps.MenuItem("Quick Capture"),
             rumps.MenuItem("Open DB Folder"),
             rumps.MenuItem("Show Latest Note"),
@@ -1342,10 +1458,12 @@ class AppGUI(rumps.App):
             rumps.MenuItem("Pipeline Status"),
             rumps.MenuItem("View Log"),
             rumps.MenuItem("Quit")
-    
         ]
+
+        # Start background processor
         self.processor = PipelineProcessor(INPUT_STREAM)
         self.processor.start()
+
     def _install_global_hotkey(self):
         """
         Global hotkey: Option + Space opens Quick Capture from anywhere.
@@ -1450,6 +1568,16 @@ class AppGUI(rumps.App):
 
     @rumps.clicked("Quick Capture")
     def quick_capture(self, _):
+        if PYOBJC_AVAILABLE:
+            try:
+                if not hasattr(self, "_qc"):
+                    self._qc = QuickCapturePanelController.alloc().init()
+                self._qc.show()
+                return
+            except Exception:
+                pass
+        # Fallback to rumps dialog
+
         win = rumps.Window(title="Quick Capture", message="Type your thought:", default_text="", ok="Save", cancel="Cancel")
         resp = win.run()
         if resp.clicked:

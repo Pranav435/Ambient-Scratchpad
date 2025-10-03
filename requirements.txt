@@ -1,10 +1,34 @@
-rumps
-PyQt5
-openai
-python-dotenv
-requests
-beautifulsoup4
-youtube-transcript-api
-numpy
-pathway
-py2app
+DeprecationWarning: PEP 484 type hint typing.Iterable[pathway.internals.expression.ColumnReference] deprecated by PEP 585. This hint is scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". For further commentary and alternatives, see also:
+    https://beartype.readthedocs.io/en/latest/api_roar/#pep-585-deprecations
+  warn(
+2025-10-03 21:31:14,330 INFO Starting Pathway streaming (opt-in).
+2025-10-03 21:31:24,164 INFO Computing actionable summary for 8 notes
+2025-10-03 21:31:29,173 INFO HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-10-03 21:31:29,186 INFO Pushing summaries to UI: one_line='8 notes — focus on Other. Highlights: Akshita needs to provide maggi masala.; The note expresses that Tashvi is unfamiliar with ; The note is a reminder to check on Tashvi.' len(summary)=571
+2025-10-03 21:31:29,186 INFO UI: updating actionable summary (len=571)
+2025-10-03 21:31:29,190 INFO UI: updating one-line summary to: '8 notes — focus on Other. Highlights: Akshita needs to provide maggi masala.; The note expresses that Tashvi is unfamiliar with ; The note is a reminder to check on Tashvi.'
+^C%                                                                             (venv) pranav@Pranavs-MacBook-Air Ambient-Scratchpad % 
+(venv) pranav@Pranavs-MacBook-Air Ambient-Scratchpad % 
+(venv) pranav@Pranavs-MacBook-Air Ambient-Scratchpad % clear
+
+(venv) pranav@Pranavs-MacBook-Air Ambient-Scratchpad % 
+(venv) pranav@Pranavs-MacBook-Air Ambient-Scratchpad % py main-fixed-21.py
+/Users/pranav/Documents/coding_projects/Ambient-Scratchpad/main-fixed-21.py:59: ObjCSuperWarning: Objective-C subclass uses super(), but super is not objc.super
+  class ShowAllNotesWindowController(NSObject):
+Traceback (most recent call last):
+  File "/Users/pranav/Documents/coding_projects/Ambient-Scratchpad/main-fixed-21.py", line 165, in <module>
+    _WC = ShowAllNotesWindowController.alloc().init()
+  File "/Users/pranav/Documents/coding_projects/Ambient-Scratchpad/main-fixed-21.py", line 61, in init
+    self = super().init()
+           ^^^^^^^^^^^^
+AttributeError: 'super' object has no attribute 'init'
+(venv) pranav@Pranavs-MacBook-Air Ambient-Scratchpad % 
+(venv) pranav@Pranavs-MacBook-Air Ambient-Scratchpad % 
+
+
+
+
+
+
+
+

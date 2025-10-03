@@ -1070,11 +1070,11 @@ if PYOBJC_AVAILABLE:
             try:
                 self._summary.setDrawsBackground_(True)
                 self._summary.setBackgroundColor_(NSColor.textBackgroundColor())
-                self._summary.setTextColor_(NSColor.textColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             try:
-                self._summary.setTextColor_(NSColor.labelColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             sum_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0,0,940,140))

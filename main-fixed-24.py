@@ -1073,12 +1073,25 @@ if PYOBJC_AVAILABLE:
                 self._summary.setTextColor_(NSColor.textColor())
             except Exception:
                 pass
+            
+            # Enforce readable contrast regardless of vibrancy/dark mode
             try:
+                self._summary.setDrawsBackground_(True)
+                self._summary.setBackgroundColor_(NSColor.windowBackgroundColor())
+                self._summary.setTextColor_(NSColor.labelColor())
+            except Exception:
+                pass
+try:
                 self._summary.setTextColor_(NSColor.labelColor())
             except Exception:
                 pass
             sum_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0,0,940,140))
             sum_scroll.setDocumentView_(self._summary)
+            try:
+                sum_scroll.setDrawsBackground_(True)
+                sum_scroll.setBackgroundColor_(NSColor.windowBackgroundColor())
+            except Exception:
+                pass
             sum_scroll.setHasVerticalScroller_(True)
             sum_scroll.setAutohidesScrollers_(True)
 
@@ -1115,7 +1128,7 @@ if PYOBJC_AVAILABLE:
             top_stack.setSpacing_(8.0)
             try:
                 # add a slight inset so labels aren't flush left
-                top_stack.setEdgeInsets_((4.0, 12.0, 4.0, 12.0))
+                top_stack.setEdgeInsets_((4.0, 24.0, 4.0,  12.0))
             except Exception:
                 pass
             top_stack.addView_inGravity_(self._search, 1)

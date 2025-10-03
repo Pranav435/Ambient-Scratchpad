@@ -798,6 +798,106 @@ def show_text_window(title: str, text: str, width: int = 800, height: int = 600)
 
 # ---------- Native "Show All Notes" UI (macOS) ----------
 if PYOBJC_AVAILABLE:
+
+    # --- QuickCapture panel controller (focus-safe) ---
+    class QuickCapturePanelController(NSObject):
+        def init(self):
+            self = super(QuickCapturePanelController, self).init()
+            if self is None:
+                return None
+            self.window = None
+            self.textField = None
+            self.resultText = None
+            return self
+
+        def build_(self):
+            rect = NSMakeRect(0, 0, 520, 120)
+            style = NSTitledWindowMask | NSClosableWindowMask
+            self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(rect, style, NSBackingStoreBuffered, False)
+            self.window.setTitle_("Quick Capture")
+            try:
+                self.window.center()
+            except Exception:
+                pass
+            content = self.window.contentView()
+            label = NSTextField.alloc().initWithFrame_(NSMakeRect(16, 78, 488, 18))
+            label.setBezeled_(False)
+            label.setDrawsBackground_(False)
+            label.setEditable_(False)
+            label.setSelectable_(False)
+            label.setStringValue_("Type your thought and press Return to save")
+            self.textField = NSTextField.alloc().initWithFrame_(NSMakeRect(16, 46, 488, 24))
+            try:
+                self.textField.setPlaceholderString_("What's on your mind?")
+            except Exception:
+                pass
+            saveBtn = NSButton.alloc().initWithFrame_(NSMakeRect(330, 12, 80, 28))
+            saveBtn.setTitle_("Save")
+            cancelBtn = NSButton.alloc().initWithFrame_(NSMakeRect(420, 12, 80, 28))
+            cancelBtn.setTitle_("Cancel")
+            try:
+                saveBtn.setBezelStyle_(1)
+                cancelBtn.setBezelStyle_(1)
+            except Exception:
+                pass
+            try:
+                saveBtn.setTarget_(self)
+                saveBtn.setAction_(objc.selector(self.saveClicked_, signature=b'v@:'))
+                cancelBtn.setTarget_(self)
+                cancelBtn.setAction_(objc.selector(self.cancelClicked_, signature=b'v@:'))
+                self.window.setDefaultButtonCell_(saveBtn.cell())
+            except Exception:
+                pass
+            try:
+                content.addSubview_(label)
+            except Exception:
+                pass
+            content.addSubview_(self.textField)
+            content.addSubview_(saveBtn)
+            content.addSubview_(cancelBtn)
+
+        def runModalAndGetText(self):
+            try:
+                NSRunningApplication.currentApplication().activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+            except Exception:
+                pass
+            if self.window is None:
+                self.build_(None)
+            self.window.makeKeyAndOrderFront_(None)
+            try:
+                self.window.makeFirstResponder_(self.textField)
+            except Exception:
+                pass
+            try:
+                NSApplication.sharedApplication().runModalForWindow_(self.window)
+            except Exception:
+                pass
+            return self.resultText or ""
+
+        def saveClicked_(self, sender):
+            try:
+                self.resultText = str(self.textField.stringValue() or "").strip()
+            except Exception:
+                self.resultText = ""
+            try:
+                self.window.orderOut_(None)
+            except Exception:
+                pass
+            try:
+                NSApplication.sharedApplication().stopModalWithCode_(1)
+            except Exception:
+                pass
+
+        def cancelClicked_(self, sender):
+            self.resultText = ""
+            try:
+                self.window.orderOut_(None)
+            except Exception:
+                pass
+            try:
+                NSApplication.sharedApplication().stopModalWithCode_(0)
+            except Exception:
+                pass
     class ShowAllNotesWindowController(NSObject):
         """
         A split-view native window:
@@ -1070,11 +1170,11 @@ if PYOBJC_AVAILABLE:
             try:
                 self._summary.setDrawsBackground_(True)
                 self._summary.setBackgroundColor_(NSColor.textBackgroundColor())
-                self._summary.setTextColor_(NSColor.textColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             try:
-                self._summary.setTextColor_(NSColor.labelColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             sum_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0,0,940,140))
@@ -1346,6 +1446,9 @@ class AppGUI(rumps.App):
         ]
         self.processor = PipelineProcessor(INPUT_STREAM)
         self.processor.start()
+    # Install global Option+Space hotkey for Quick Capture
+        self._install_global_hotkey()
+
     def _install_global_hotkey(self):
         """
         Global hotkey: Option + Space opens Quick Capture from anywhere.
@@ -1450,24 +1553,68 @@ class AppGUI(rumps.App):
 
     @rumps.clicked("Quick Capture")
     def quick_capture(self, _):
-        win = rumps.Window(title="Quick Capture", message="Type your thought:", default_text="", ok="Save", cancel="Cancel")
-        resp = win.run()
-        if resp.clicked:
-            text = (resp.text or "").strip()
-            if not text:
-                rumps.notification(APP_NAME, "Capture not saved", "Empty input")
-                return
-            obj = {"id": str(uuid.uuid4()), "timestamp": now_iso(), "content": text}
+        logging.info("QuickCapture: invoked")
+        text = ""
+        if PYOBJC_AVAILABLE:
+            try:
+                controller = QuickCapturePanelController.alloc().init()
+                text = controller.runModalAndGetText()
+            except Exception:
+                logging.exception("QuickCapture: panel failed; fallback to rumps.Window")
+
+        if not text:
+            try:
+                win = rumps.Window(title="Quick Capture", message="Type your thought:", default_text="", ok="Save", cancel="Cancel")
+                resp = win.run()
+                if int(getattr(resp, "clicked", 0) or 0) == 1:
+                    text = (getattr(resp, "text", "") or "").strip()
+            except Exception:
+                logging.exception("QuickCapture: rumps fallback failed")
+
+        if not text:
+            rumps.notification(APP_NAME, "Capture not saved", "Empty or cancelled")
+            return
+
+        obj = {"id": str(uuid.uuid4()), "timestamp": now_iso(), "content": text}
+        try:
             append_to_input_stream(obj)
+            logging.info("QuickCapture: appended %s", obj["id"])
+        except Exception:
+            logging.exception("QuickCapture: append failed")
 
-            # --- Immediate enrich patch ---
-            threading.Thread(
-                target=lambda: (process_capture_object(obj, store=True), self._refresh_all_notes_ui()),
-                daemon=True
-            ).start()
-            # --- end patch ---
+        def _save_and_refresh():
+            try:
+                logging.info("QuickCapture: processing/store start")
+                process_capture_object(obj, store=True)
+                logging.info("QuickCapture: processed/stored; refreshing UI")
+                self._refresh_all_notes_ui()
+            except Exception:
+                logging.exception("QuickCapture: process/store failed")
 
-            rumps.notification(APP_NAME, "Saved", text[:200])
+        threading.Thread(target=_save_and_refresh, daemon=True).start()
+        rumps.notification(APP_NAME, "Saved", text[:200])
+
+
+        def _save_and_refresh():
+            try:
+                logging.info("QuickCapture: processing/store start")
+                process_capture_object(obj, store=True)
+                logging.info("QuickCapture: processed/stored; refreshing UI")
+                self._refresh_all_notes_ui()
+            except Exception:
+                logging.exception("QuickCapture: process/store failed")
+
+        threading.Thread(target=_save_and_refresh, daemon=True).start()
+        rumps.notification(APP_NAME, "Saved", text[:200])
+
+        def _save_and_refresh():
+            try:
+                process_capture_object(obj, store=True)
+                self._refresh_all_notes_ui()
+            except Exception:
+                logging.exception("QuickCapture: process/store failed")
+        threading.Thread(target=_save_and_refresh, daemon=True).start()
+        rumps.notification(APP_NAME, "Saved", text[:200])
 
     @rumps.clicked("Process Raw Now")
     def process_raw_now(self, _):

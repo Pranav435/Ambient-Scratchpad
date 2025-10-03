@@ -1070,11 +1070,11 @@ if PYOBJC_AVAILABLE:
             try:
                 self._summary.setDrawsBackground_(True)
                 self._summary.setBackgroundColor_(NSColor.textBackgroundColor())
-                self._summary.setTextColor_(NSColor.textColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             try:
-                self._summary.setTextColor_(NSColor.labelColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             sum_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0,0,940,140))
@@ -1346,6 +1346,9 @@ class AppGUI(rumps.App):
         ]
         self.processor = PipelineProcessor(INPUT_STREAM)
         self.processor.start()
+    # Install global Option+Space hotkey for Quick Capture
+        self._install_global_hotkey()
+
     def _install_global_hotkey(self):
         """
         Global hotkey: Option + Space opens Quick Capture from anywhere.
@@ -1450,24 +1453,40 @@ class AppGUI(rumps.App):
 
     @rumps.clicked("Quick Capture")
     def quick_capture(self, _):
-        win = rumps.Window(title="Quick Capture", message="Type your thought:", default_text="", ok="Save", cancel="Cancel")
-        resp = win.run()
-        if resp.clicked:
-            text = (resp.text or "").strip()
-            if not text:
-                rumps.notification(APP_NAME, "Capture not saved", "Empty input")
-                return
-            obj = {"id": str(uuid.uuid4()), "timestamp": now_iso(), "content": text}
+        logging.info("QuickCapture: invoked")
+        try:
+            if PYOBJC_AVAILABLE:
+                try:
+                    NSRunningApplication.currentApplication().activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+                except Exception:
+                    pass
+            win = rumps.Window(message="Type your thought:", title="Quick Capture", default_text="", ok="Save", cancel="Cancel")
+            resp = win.run()
+        except Exception:
+            logging.exception("QuickCapture: window failed")
+            return
+        clicked = int(getattr(resp, "clicked", 0) or 0)
+        text = (getattr(resp, "text", "") or "").strip()
+        logging.info("QuickCapture: closed clicked=%s len=%d", clicked, len(text))
+        if clicked != 1:
+            return
+        if not text:
+            rumps.notification(APP_NAME, "Capture not saved", "Empty input")
+            return
+        obj = {"id": str(uuid.uuid4()), "timestamp": now_iso(), "content": text}
+        try:
             append_to_input_stream(obj)
-
-            # --- Immediate enrich patch ---
-            threading.Thread(
-                target=lambda: (process_capture_object(obj, store=True), self._refresh_all_notes_ui()),
-                daemon=True
-            ).start()
-            # --- end patch ---
-
-            rumps.notification(APP_NAME, "Saved", text[:200])
+            logging.info("QuickCapture: appended %s", obj["id"])
+        except Exception:
+            logging.exception("QuickCapture: append failed")
+        def _save_and_refresh():
+            try:
+                process_capture_object(obj, store=True)
+                self._refresh_all_notes_ui()
+            except Exception:
+                logging.exception("QuickCapture: process/store failed")
+        threading.Thread(target=_save_and_refresh, daemon=True).start()
+        rumps.notification(APP_NAME, "Saved", text[:200])
 
     @rumps.clicked("Process Raw Now")
     def process_raw_now(self, _):

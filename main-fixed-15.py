@@ -1045,8 +1045,14 @@ if PYOBJC_AVAILABLE:
             self._detail.setRichText_(False)
             try:
                 self._detail.setDrawsBackground_(True)
-                self._detail.setBackgroundColor_(NSColor.textBackgroundColor())
-                self._detail.setTextColor_(NSColor.textColor())
+                try:
+                    self._detail.setBackgroundColor_(NSColor.windowBackgroundColor())
+                except Exception:
+                    self._detail.setBackgroundColor_(NSColor.textBackgroundColor())
+                try:
+                    self._detail.setTextColor_(NSColor.labelColor())
+                except Exception:
+                    self._detail.setTextColor_(NSColor.textColor())
             except Exception:
                 pass
             self._detail.setUsesFontPanel_(False)
@@ -1062,6 +1068,11 @@ if PYOBJC_AVAILABLE:
             right_scroll.setDocumentView_(self._detail)
             right_scroll.setHasVerticalScroller_(True)
             right_scroll.setAutohidesScrollers_(True)
+            try:
+                right_scroll.setDrawsBackground_(True)
+                right_scroll.setBackgroundColor_(NSColor.windowBackgroundColor())
+            except Exception:
+                pass
 
             # summary (bottom) text view
             self._summary = NSTextView.alloc().initWithFrame_(NSMakeRect(0,0,940,140))
@@ -1069,8 +1080,11 @@ if PYOBJC_AVAILABLE:
             self._summary.setRichText_(False)
             try:
                 self._summary.setDrawsBackground_(True)
-                self._summary.setBackgroundColor_(NSColor.textBackgroundColor())
-                self._summary.setTextColor_(NSColor.textColor())
+                try:
+                    self._summary.setBackgroundColor_(NSColor.windowBackgroundColor())
+                except Exception:
+                    self._summary.setBackgroundColor_(NSColor.textBackgroundColor())
+                self._summary.setTextColor_(NSColor.labelColor())
             except Exception:
                 pass
             try:
@@ -1081,6 +1095,11 @@ if PYOBJC_AVAILABLE:
             sum_scroll.setDocumentView_(self._summary)
             sum_scroll.setHasVerticalScroller_(True)
             sum_scroll.setAutohidesScrollers_(True)
+            try:
+                sum_scroll.setDrawsBackground_(True)
+                sum_scroll.setBackgroundColor_(NSColor.windowBackgroundColor())
+            except Exception:
+                pass
 
             # layout with split view on right (detail + summary)
             right_split = NSSplitView.alloc().initWithFrame_(NSMakeRect(0,0,660,600))
@@ -1115,7 +1134,7 @@ if PYOBJC_AVAILABLE:
             top_stack.setSpacing_(8.0)
             try:
                 # add a slight inset so labels aren't flush left
-                top_stack.setEdgeInsets_((4.0, 12.0, 4.0, 12.0))
+                top_stack.setEdgeInsets_((6.0, 20.0, 6.0, 12.0))
             except Exception:
                 pass
             top_stack.addView_inGravity_(self._search, 1)
@@ -1346,6 +1365,14 @@ class AppGUI(rumps.App):
         ]
         self.processor = PipelineProcessor(INPUT_STREAM)
         self.processor.start()
+        # Install global hotkey (Option+Space) for quick capture
+        try:
+            self._install_global_hotkey()
+        except Exception as e:
+            try:
+                logging.error('Failed to install global hotkey: %s', e)
+            except Exception:
+                pass
     def _install_global_hotkey(self):
         """
         Global hotkey: Option + Space opens Quick Capture from anywhere.
