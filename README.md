@@ -2,20 +2,22 @@
 
 _A lightweight, AI-augmented note-taking app for macOS that lives in your menubar._
 
-Ambient Scratchpad is built for **fast capture and intelligent recall**. Instead of just storing text, it enriches your notes automatically with **AI classification, tags, summaries, and related connections**. A unique selling point is its **real-time AI pipeline** — powered by [Pathway](https://pathway.com/) and [OpenAI](https://platform.openai.com/) — combined with a **native macOS experience**.
+Ambient Scratchpad is built for **fast capture and intelligent recall**. Every note is more than just text: it’s enriched with **AI classification, tags, summaries, embeddings, and related connections**.  
+What makes this unique is the **real-time streaming pipeline** — powered by [Pathway](https://pathway.com/) and [OpenAI](https://platform.openai.com/) — combined with a **native macOS experience**.
 
 ---
 
 ## ✨ Why Ambient Scratchpad?
 
-- 🖊️ **Quick capture** from anywhere in macOS, right from the menubar.
+- 🖊️ **Quick capture** from anywhere in macOS, right from the menubar (`⌥+Space`).
 - 🧠 **AI enrichment**:
   - Classifies each note (Idea, To-Do, Snippet, etc.)
   - Adds tags and entities
   - Generates a one-line summary
-- 🔗 **Smart linking** between notes using embeddings + cosine similarity.
-- 📊 **Actionable full summaries** — prioritized to-dos, projects, inspirations, and follow-ups in one place.
-- ⚡ **Pathway integration** for optional real-time streaming.
+  - Embeds notes into vector space for similarity search
+- 🔗 **Smart linking** between notes using cosine similarity on embeddings.
+- 📊 **Actionable full summaries**: automatically structured into to-dos, projects, inspirations, and follow-ups.
+- ⚡ **Pathway streaming engine**: real-time deduplication, ordering, and consistent enrichment pipeline.
 - 🍎 **Native macOS feel**:
   - Menubar app via [rumps](https://github.com/jaredks/rumps)
   - Scrollable, resizable windows via [PyObjC / AppKit](https://pypi.org/project/pyobjc/)
@@ -29,40 +31,48 @@ Ambient Scratchpad’s USP:
 
 ### Data Flow
 1. **Capture**  
-   Notes are captured either via the menubar “Quick Capture” or by appending to an input stream file (`input_stream.jsonl`).
+   - Notes are captured via the menubar Quick Capture (`⌥+Space`) or appended to `input_stream.jsonl`.
 
-2. **Enrichment**  
-   Each note is processed by OpenAI:
-   - `chat.completions` → classification, tags, entities, and summary
-   - `embeddings` → vector representation for similarity search
+2. **Streaming**  
+   - **Preferred:** Pathway watches the JSONL file as a **live table** with schema `(id, timestamp, content)`.
+   - It groups by note `id`, picks the **latest timestamp**, and ensures **only the newest version** of each note is processed.
+   - **Fallback:** If Pathway is not enabled, a simple polling loop tails the file and processes new lines.
 
-3. **Storage**  
-   Enriched notes are stored in an SQLite database (`knowledge_base.db`) with embeddings, metadata, and related links.
+3. **Enrichment**  
+   Each latest note flows through `process_capture_object`:
+   - OpenAI `chat.completions` → classification, tags, entities, one-line summary
+   - OpenAI `embeddings` → vector representation for similarity search
+   - Related notes computed via cosine similarity
 
-4. **Connections**  
-   Cosine similarity finds related notes, stored alongside each entry.
+4. **Storage**  
+   Notes are persisted in `knowledge_base.db` (SQLite).  
+   Embeddings are stored as binary blobs, ensuring durability and reusability.  
+   Writes are **idempotent** (`INSERT OR REPLACE`), so replays/duplicates never corrupt the DB.
 
-5. **Summarization**  
-   When viewing all notes, the app queries OpenAI again to build a **structured summary**:
-   - To-Dos (with priority)
+5. **Connections**  
+   Each note is linked to its most relevant neighbors (using a configurable similarity threshold).
+
+6. **Summarization**  
+   When you open “Show All Notes”, the app can build a **structured actionable summary**:
+   - To-Dos
    - Project ideas
    - Inspirations
    - Follow-ups
-   - Overall one-line summary
+   - One-line overview
 
-6. **Presentation**  
+7. **Presentation**  
    - Menubar menus for quick actions  
-   - Scrollable native windows for long text views (notes + summaries)  
+   - Native PyObjC windows for large summaries, scrollable & resizable  
 
 ---
 
 ## ⚙️ Tech Stack
 
 - **Python 3.10+**
-- **[rumps](https://github.com/jaredks/rumps)** — lightweight menubar apps
-- **[PyObjC / AppKit](https://pypi.org/project/pyobjc/)** — native macOS scrollable windows
-- **[OpenAI](https://platform.openai.com/)** — classification, embeddings, and summarization
-- **[Pathway](https://pathway.com/)** — (optional) real-time streaming pipeline
+- **[rumps](https://github.com/jaredks/rumps)** — lightweight macOS menubar apps
+- **[PyObjC / AppKit](https://pypi.org/project/pyobjc/)** — native scrollable windows
+- **[OpenAI](https://platform.openai.com/)** — classification, embeddings, summarization
+- **[Pathway](https://pathway.com/)** — real-time streaming pipeline (dedupe + consistency)
 - **SQLite** — persistent storage
 - **dotenv** — environment configuration
 - **requests + BeautifulSoup** — lightweight web scraping for links
@@ -93,13 +103,11 @@ pip install rumps openai python-dotenv pyobjc pathway requests beautifulsoup4 nu
 
 ### 3. Configure `.env`
 
-Create a `.env` file:
-
 ```ini
 OPENAI_API_KEY=sk-...yourkey...
 OPENAI_CLASSIFY_MODEL=gpt-4o-mini
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-USE_PATHWAY_STREAM=0
+USE_PATHWAY_STREAM=1   # 1 = use Pathway (recommended), 0 = fallback polling
 ```
 
 ### 4. Run
@@ -114,14 +122,12 @@ The app appears in your **macOS menubar**.
 
 ## 📦 Packaging as a macOS `.app`
 
-To build a standalone `.app` bundle:
-
 1. Install py2app:
 
    ```bash
    pip install py2app
    ```
-2. Add a `setup.py` (example provided in repo).
+2. Add a `setup.py` (example in repo).
 3. Build:
 
    ```bash
@@ -136,7 +142,7 @@ To build a standalone `.app` bundle:
 ```
 AmbientScratchpad/
 │
-├── main.py              # main app logic
+├── main.py              # app logic & Pathway pipeline
 ├── knowledge_base.db    # SQLite DB (auto-created)
 ├── input_stream.jsonl   # raw captures (append-only)
 ├── ambient.log          # log file
@@ -148,12 +154,13 @@ AmbientScratchpad/
 
 ## 🔍 Example: Note Lifecycle
 
-1. You capture a note:
+1. Capture a note:
 
    ```
    “Work on pitch deck by Friday”
    ```
-2. OpenAI enriches it:
+2. Pathway ensures only the **latest version** of this note is processed.
+3. OpenAI enriches it:
 
    ```json
    {
@@ -163,47 +170,29 @@ AmbientScratchpad/
      "summary": "Task: finish pitch deck by Friday"
    }
    ```
-3. It’s embedded and linked to related notes about “work” and “projects”.
-4. In “Show All Notes” view, the full summary shows:
-
-   ```
-   ==== Actionable Summary ====
-
-   1) Top actionable To-Dos
-   - Finish pitch deck by Friday (high)
-
-   2) Project ideas
-   None
-
-   3) Quick inspirations
-   None
-
-   4) Follow-ups / people / links
-   None
-
-   5) Overall
-   Notes suggest urgent work deliverables this week.
-   ```
+4. Embedding links it to related notes.
+5. In “Show All Notes”, the full actionable summary appears.
 
 ---
 
 ## 🛠 Development Notes
 
-* Menubar menu interactions are **non-blocking** (threads for background AI).
-* Large note views use **PyObjC AppKit windows**, so:
+* Quick Capture is always **non-blocking** (runs in threads).
+* Pathway streaming is **preferred**:
 
-  * They are scrollable & resizable
-  * They do **not gray out** the menubar
-* Pathway is **optional**: polling is used by default for safety.
+  * Deduplicates notes by `id`
+  * Processes only the latest version
+  * Provides crash-safe, idempotent state
+* Polling mode is kept as a fallback for environments without Pathway.
 
 ---
 
 ## 🗺️ Roadmap
 
-* [ ] Export summaries to text/Markdown files
-* [ ] Search & filter notes by tags/entities
+* [ ] Export summaries to Markdown/HTML
+* [ ] Advanced search & filter by tags/entities
 * [ ] Sync across devices
-* [ ] Collaborative editing mode
+* [ ] Collaborative editing
 
 ---
 

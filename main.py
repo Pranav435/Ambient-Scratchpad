@@ -1,3 +1,5 @@
+# Minimum cosine similarity to consider as related
+RELATION_MIN_SCORE = 0.35
 # main.py
 """
 Ambient Scratchpad — rumps menubar + PyObjC scrollable windows for large text.
@@ -180,7 +182,8 @@ def _bootstrap_backfill_if_needed(max_lines=5000):
 
 
 def now_iso() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 def append_to_input_stream(obj: dict):
     os.makedirs(os.path.dirname(INPUT_STREAM) or ".", exist_ok=True)
@@ -369,22 +372,27 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
         s = sum(ai*bi for ai,bi in zip(a,b))
         return s / (lena * lenb)
 
-def compute_related_with_scores(embedding: List[float], top_k=5) -> List[Dict[str, Any]]:
+def compute_related_with_scores(
+    embedding: List[float],
+    top_k: int = 10,
+    exclude_id: str | None = None,
+) -> List[Dict[str, Any]]:
     rows = read_all_embeddings_from_db()
     if not rows:
         return []
-    sims = []
+    sims: List[Dict[str, Any]] = []
     for r in rows:
         try:
-            sc = cosine_similarity(embedding, r["emb"])
-            if sc >= RELATED_MIN_SCORE:
-                sims.append({"id": r["id"], "score": float(sc)})
+            rid = r.get("id")
+            if exclude_id and rid == exclude_id:
+                continue
+            sc = cosine_similarity(embedding, r.get("emb") or r.get("embedding") or [])
+            if sc >= globals().get("RELATION_MIN_SCORE", 0.35):
+                sims.append({"id": rid, "score": float(sc)})
         except Exception:
             continue
     sims.sort(key=lambda x: x["score"], reverse=True)
-    return sims[: min(top_k, RELATED_MAX_PER_NOTE)]
-
-
+    return sims[: min(top_k, globals().get("RELATED_MAX_PER_NOTE", 10))]
 def store_enriched_note(note: dict):
     with db_lock:
         c = db_conn.cursor()
@@ -476,7 +484,7 @@ def process_capture_object(obj: dict, *, store: bool = True) -> dict:
     effective = scraped or content or ""
     meta = classify_and_tag_with_openai(effective)
     emb = get_embedding_openai(effective)
-    candidates = compute_related_with_scores(emb, top_k=10)
+    candidates = compute_related_with_scores(emb, top_k=10, exclude_id=obj.get("id"))
     filtered = [r for r in candidates if r["id"] != nid]
     top_related = filtered[:5]
     enriched = {
@@ -798,6 +806,168 @@ def show_text_window(title: str, text: str, width: int = 800, height: int = 600)
 
 # ---------- Native "Show All Notes" UI (macOS) ----------
 if PYOBJC_AVAILABLE:
+
+    # --- App activation policy helpers ---
+    try:
+        from AppKit import NSApplication, NSApp
+    except Exception:
+        NSApplication = None
+        NSApp = None
+    try:
+        from AppKit import NSApplicationActivationPolicyRegular as _AP_REGULAR
+        from AppKit import NSApplicationActivationPolicyAccessory as _AP_ACCESSORY
+    except Exception:
+        _AP_REGULAR, _AP_ACCESSORY = 0, 1  # numeric fallbacks
+
+    def _set_policy_regular_temporarily():
+        try:
+            app = NSApplication.sharedApplication()
+            try:
+                _orig = int(app.activationPolicy())
+            except Exception:
+                _orig = _AP_ACCESSORY
+            if _orig != _AP_REGULAR:
+                app.setActivationPolicy_(_AP_REGULAR)
+            try:
+                app.activateIgnoringOtherApps_(True)
+            except Exception:
+                pass
+            return _orig
+        except Exception:
+            return None
+
+    def _restore_policy(policy_value):
+        try:
+            if policy_value is None:
+                return
+            app = NSApplication.sharedApplication()
+            app.setActivationPolicy_(policy_value)
+        except Exception:
+            pass
+
+    # Style mask compatibility (AppKit constants vary by macOS / PyObjC)
+    try:
+        from AppKit import NSWindowStyleMaskTitled as _STYLE_TITLED
+        from AppKit import NSWindowStyleMaskClosable as _STYLE_CLOSABLE
+    except Exception:
+        try:
+            from AppKit import NSTitledWindowMask as _STYLE_TITLED
+            from AppKit import NSClosableWindowMask as _STYLE_CLOSABLE
+        except Exception:
+            _STYLE_TITLED, _STYLE_CLOSABLE = (1 << 0), (1 << 1)  # sensible defaults
+
+    # Common AppKit classes used by QuickCapture panel
+    try:
+        from AppKit import NSButton, NSApplication
+    except Exception:
+        pass
+
+    # --- QuickCapture panel controller (focus-safe) ---
+    class QuickCapturePanelController(NSObject):
+        def init(self):
+            self = objc.super(QuickCapturePanelController, self).init()
+            if self is None:
+                return None
+            self.window = None
+            self.textField = None
+            self.resultText = None
+            return self
+
+        def build(self):
+            rect = NSMakeRect(0, 0, 520, 120)
+            style = _STYLE_TITLED | _STYLE_CLOSABLE
+            self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(rect, style, NSBackingStoreBuffered, False)
+            self.window.setTitle_("Quick Capture")
+            try:
+                self.window.center()
+            except Exception:
+                pass
+            content = self.window.contentView()
+            label = NSTextField.alloc().initWithFrame_(NSMakeRect(16, 78, 488, 18))
+            label.setBezeled_(False)
+            label.setDrawsBackground_(False)
+            label.setEditable_(False)
+            label.setSelectable_(False)
+            label.setStringValue_("Type your thought and press Return to save")
+            self.textField = NSTextField.alloc().initWithFrame_(NSMakeRect(16, 46, 488, 24))
+            try:
+                self.textField.setPlaceholderString_("What's on your mind?")
+            except Exception:
+                pass
+            saveBtn = NSButton.alloc().initWithFrame_(NSMakeRect(330, 12, 80, 28))
+            saveBtn.setTitle_("Save")
+            cancelBtn = NSButton.alloc().initWithFrame_(NSMakeRect(420, 12, 80, 28))
+            cancelBtn.setTitle_("Cancel")
+            try:
+                saveBtn.setBezelStyle_(1)
+                cancelBtn.setBezelStyle_(1)
+            except Exception:
+                pass
+            try:
+                saveBtn.setTarget_(self)
+                saveBtn.setAction_(objc.selector(self.saveClicked_, signature=b'v@:@'))
+                cancelBtn.setTarget_(self)
+                cancelBtn.setAction_(objc.selector(self.cancelClicked_, signature=b'v@:@'))
+                self.window.setDefaultButtonCell_(saveBtn.cell())
+            except Exception:
+                pass
+            try:
+                content.addSubview_(label)
+            except Exception:
+                pass
+            content.addSubview_(self.textField)
+            content.addSubview_(saveBtn)
+            content.addSubview_(cancelBtn)
+
+        def runModalAndGetText(self):
+            _orig_policy = _set_policy_regular_temporarily()
+            try:
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except Exception:
+                pass
+            if self.window is None:
+                self.build()
+            self.window.makeKeyAndOrderFront_(None)
+            try:
+                self.window.makeKeyWindow()
+            except Exception:
+                pass
+            try:
+                self.window.makeFirstResponder_(self.textField)
+            except Exception:
+                pass
+            try:
+                NSApplication.sharedApplication().runModalForWindow_(self.window)
+            except Exception:
+                pass
+            res = self.resultText or ""
+            _restore_policy(_orig_policy)
+            return res
+
+        def saveClicked_(self, sender):
+            try:
+                self.resultText = str(self.textField.stringValue() or "").strip()
+            except Exception:
+                self.resultText = ""
+            try:
+                self.window.orderOut_(None)
+            except Exception:
+                pass
+            try:
+                NSApplication.sharedApplication().stopModalWithCode_(1)
+            except Exception:
+                pass
+
+        def cancelClicked_(self, sender):
+            self.resultText = ""
+            try:
+                self.window.orderOut_(None)
+            except Exception:
+                pass
+            try:
+                NSApplication.sharedApplication().stopModalWithCode_(0)
+            except Exception:
+                pass
     class ShowAllNotesWindowController(NSObject):
         """
         A split-view native window:
@@ -1070,11 +1240,11 @@ if PYOBJC_AVAILABLE:
             try:
                 self._summary.setDrawsBackground_(True)
                 self._summary.setBackgroundColor_(NSColor.textBackgroundColor())
-                self._summary.setTextColor_(NSColor.textColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             try:
-                self._summary.setTextColor_(NSColor.labelColor())
+                self._summary.setTextColor_(NSColor.whiteColor())
             except Exception:
                 pass
             sum_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0,0,940,140))
@@ -1346,6 +1516,16 @@ class AppGUI(rumps.App):
         ]
         self.processor = PipelineProcessor(INPUT_STREAM)
         self.processor.start()
+    
+        # Make app a foreground app so text fields can become first responder
+        try:
+            if PYOBJC_AVAILABLE and NSApplication is not None:
+                NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        except Exception:
+            pass
+# Install global Option+Space hotkey for Quick Capture
+        self._install_global_hotkey()
+
     def _install_global_hotkey(self):
         """
         Global hotkey: Option + Space opens Quick Capture from anywhere.
@@ -1364,14 +1544,22 @@ class AppGUI(rumps.App):
         def _handle_global(event):
             try:
                 flags = int(event.modifierFlags())
+                try:
+                    from AppKit import NSEventModifierFlagOption as _OPT_FLAG
+                except Exception:
+                    try:
+                        from AppKit import NSAlternateKeyMask as _OPT_FLAG
+                    except Exception:
+                        _OPT_FLAG = 0x00080000
                 is_opt = bool(flags & _OPT_FLAG)
                 keycode = int(getattr(event, "keyCode", lambda: 0)())
                 chars = str(getattr(event, "charactersIgnoringModifiers", lambda: "")())
                 if is_opt and (keycode == 49 or chars == " "):  # 49 == spacebar
+                    # ALWAYS dispatch to the main thread for UI
                     try:
                         AppHelper.callAfter(self.quick_capture, None)
                     except Exception:
-                        self.quick_capture(None)
+                        pass
             except Exception:
                 pass
             return event
@@ -1450,24 +1638,89 @@ class AppGUI(rumps.App):
 
     @rumps.clicked("Quick Capture")
     def quick_capture(self, _):
-        win = rumps.Window(title="Quick Capture", message="Type your thought:", default_text="", ok="Save", cancel="Cancel")
-        resp = win.run()
-        if resp.clicked:
-            text = (resp.text or "").strip()
-            if not text:
-                rumps.notification(APP_NAME, "Capture not saved", "Empty input")
-                return
-            obj = {"id": str(uuid.uuid4()), "timestamp": now_iso(), "content": text}
+
+        # Ensure we're on the main thread; if not, bounce to main
+        try:
+            import threading
+            if not threading.current_thread() is threading.main_thread():
+                try:
+                    from PyObjCTools import AppHelper as _AH
+                    _AH.callAfter(self.quick_capture, None)
+                    return
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        logging.info("QuickCapture: invoked")
+        text = ""
+        if PYOBJC_AVAILABLE:
+            try:
+                controller = QuickCapturePanelController.alloc().init()
+                try:
+                    if PYOBJC_AVAILABLE and NSApplication is not None:
+                        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                except Exception:
+                    pass
+                text = controller.runModalAndGetText()
+            except Exception:
+                logging.exception("QuickCapture: panel failed; fallback to rumps.Window")
+
+        if not text:
+            try:
+                win = rumps.Window(title="Quick Capture", message="Type your thought:", default_text="", ok="Save", cancel="Cancel")
+                resp = win.run()
+                if int(getattr(resp, "clicked", 0) or 0) == 1:
+                    text = (getattr(resp, "text", "") or "").strip()
+            except Exception:
+                logging.exception("QuickCapture: rumps fallback failed")
+
+        if not text:
+            rumps.notification(APP_NAME, "Capture not saved", "Empty or cancelled")
+            return
+
+        obj = {"id": str(uuid.uuid4()), "timestamp": now_iso(), "content": text}
+        try:
             append_to_input_stream(obj)
+            logging.info("QuickCapture: appended %s", obj["id"])
+        except Exception:
+            logging.exception("QuickCapture: append failed")
 
-            # --- Immediate enrich patch ---
-            threading.Thread(
-                target=lambda: (process_capture_object(obj, store=True), self._refresh_all_notes_ui()),
-                daemon=True
-            ).start()
-            # --- end patch ---
+        def _save_and_refresh():
+            try:
+                logging.info("QuickCapture: processing/store start")
+                process_capture_object(obj, store=True)
+                logging.info("QuickCapture: processed/stored; refreshing UI")
+                self._refresh_all_notes_ui()
+            except Exception:
+                logging.exception("QuickCapture: process/store failed")
 
-            rumps.notification(APP_NAME, "Saved", text[:200])
+        t = threading.Thread(target=_save_and_refresh, daemon=True)
+        t.start()
+        rumps.notification(APP_NAME, "Saved", text[:200])
+
+
+        def _save_and_refresh():
+            try:
+                logging.info("QuickCapture: processing/store start")
+                process_capture_object(obj, store=True)
+                logging.info("QuickCapture: processed/stored; refreshing UI")
+                self._refresh_all_notes_ui()
+            except Exception:
+                logging.exception("QuickCapture: process/store failed")
+
+        t = threading.Thread(target=_save_and_refresh, daemon=True)
+        t.start()
+        rumps.notification(APP_NAME, "Saved", text[:200])
+
+        def _save_and_refresh():
+            try:
+                process_capture_object(obj, store=True)
+                self._refresh_all_notes_ui()
+            except Exception:
+                logging.exception("QuickCapture: process/store failed")
+        t = threading.Thread(target=_save_and_refresh, daemon=True)
+        t.start()
+        rumps.notification(APP_NAME, "Saved", text[:200])
 
     @rumps.clicked("Process Raw Now")
     def process_raw_now(self, _):
@@ -1663,3 +1916,40 @@ if __name__ == "__main__":
     logging.info("Ambient Scratchpad started. Input: %s DB: %s", os.path.abspath(INPUT_STREAM), os.path.abspath(DB_FILE))
     logging.info("PyObjC available: %s  Pathway imported: %s  USE_PATHWAY_STREAM: %s", PYOBJC_AVAILABLE, PATHWAY_IMPORTED, USE_PATHWAY_STREAM)
     AppGUI().run()
+
+
+def compute_related_with_scores(
+    embedding: List[float],
+    top_k: int = 10,
+    exclude_id: str | None = None,
+    **kwargs,
+) -> List[Dict[str, Any]]:
+    rows = read_all_embeddings_from_db()
+    if not rows:
+        return []
+    import math
+    def _norm(v):
+        n = math.sqrt(sum((x*x for x in v))) or 1.0
+        return [x / n for x in v]
+    q = _norm(embedding or [])
+    if not q or all(v == 0 for v in q):
+        return []
+    sims: List[Dict[str, Any]] = []
+    for r in rows:
+        try:
+            rid = r.get('id')
+            if exclude_id and rid == exclude_id:
+                continue
+            v = _norm(r.get('embedding', []))
+            if not v or len(v) != len(q):
+                continue
+            s = sum(a*b for a, b in zip(q, v))
+            if s >= globals().get('RELATION_MIN_SCORE', 0.35):
+                sims.append({'id': rid, 'score': float(s)})
+        except Exception:
+            continue
+    if not sims:
+        return []
+    sims.sort(key=lambda x: x['score'], reverse=True)
+    cap = min(top_k, globals().get('RELATED_MAX_PER_NOTE', 10))
+    return sims[:cap]
