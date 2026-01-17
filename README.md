@@ -2,7 +2,7 @@
 
 _A lightweight, AI-augmented note-taking app for macOS that lives in your menubar._
 
-Ambient Scratchpad is built for **fast capture and intelligent recall**. Every note is more than just text: it’s enriched with **AI classification, tags, summaries, embeddings, and related connections**.  
+Ambient Scratchpad is built for fast capture and intelligent recall. Every note is more than just text: it’s enriched with **AI classification, tags, summaries, embeddings, and related connections**.  
 What makes this unique is the **real-time streaming pipeline** — powered by [Pathway](https://pathway.com/) and [OpenAI](https://platform.openai.com/) — combined with a **native macOS experience**.
 
 ---
