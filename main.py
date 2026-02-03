@@ -1,12 +1,15 @@
-# Minimum cosine similarity to consider as related
-RELATION_MIN_SCORE = 0.35
+# Minimum semantic similarity score to consider notes as related
+# Higher = fewer but more meaningful relations (0.45 is fairly strict)
+RELATION_MIN_SCORE = 0.45
+# Maximum number of related notes to store per note
+RELATED_MAX_PER_NOTE = 5
 # main.py
 """
 Ambient Scratchpad — rumps menubar + PyObjC scrollable windows for large text.
 
 Requirements:
-- python -m pip install rumps openai python-dotenv pyobjc
-- Put OPENAI_API_KEY=sk-... in .env
+- python -m pip install rumps google-generativeai python-dotenv pyobjc
+- Put GEMINI_API_KEY=... in .env
 
 Behavior:
 - Uses rumps for the menubar and quick capture.
@@ -43,11 +46,12 @@ except Exception:
     print("Install python-dotenv: pip install python-dotenv")
     raise
 
-# new openai client (v1)
+# Gemini client
 try:
-    from openai import OpenAI
+    from google import genai
+    from google.genai import types
 except Exception:
-    print("Install openai>=1.0: pip install --upgrade openai")
+    print("Install google-genai: pip install google-genai")
     raise
 
 # Attempt to import PyObjC / AppKit for native windows
@@ -66,13 +70,14 @@ try:
 except Exception:
     PYOBJC_AVAILABLE = False
 
-# ==== PATHWAY: optional import (we make it meaningful but optional)
+# ==== PATHWAY: primary streaming engine for real-time note ingestion
 PATHWAY_IMPORTED = False
 try:
     warnings.filterwarnings("ignore", message=r".*pkg_resources is deprecated as an API.*", category=UserWarning)
     import pathway as pw
     PATHWAY_IMPORTED = True
 except Exception:
+    logging.warning("Pathway not installed - real-time streaming disabled. Install with: pip install pathway")
     PATHWAY_IMPORTED = False
 
 # optional scrapers / numpy
@@ -83,19 +88,20 @@ try:
 except Exception:
     SCRAPING_AVAILABLE = False
 
+import math  # Always import math for fallback operations
+
 try:
     import numpy as np
     NUMPY_AVAILABLE = True
 except Exception:
     NUMPY_AVAILABLE = False
-    import math
 
 # ---------------- Config ----------------
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-CLASSIFY_MODEL = os.getenv("OPENAI_CLASSIFY_MODEL", "gpt-4o-mini")
-EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-USE_PATHWAY_STREAM = os.getenv("USE_PATHWAY_STREAM", "0") == "1"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+CLASSIFY_MODEL = os.getenv("GEMINI_CLASSIFY_MODEL", "models/gemini-flash-latest")
+EMBED_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "models/text-embedding-004")
+USE_PATHWAY_STREAM = os.getenv("USE_PATHWAY_STREAM", "1") == "1"  # Pathway streaming enabled by default
 
 # --- ABSOLUTE PATHS (replace the 3 relative constants with this) ---
 BASE_DIR = os.path.abspath(".")
@@ -113,14 +119,10 @@ console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logging.getLogger().addHandler(console)
 logging.info("Ambient Scratchpad startup")
 
-# OpenAI client
-if OPENAI_API_KEY:
-    try:
-        openai_client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception:
-        openai_client = OpenAI()
-else:
-    openai_client = OpenAI()  # will raise on calls if not configured
+# Gemini client configuration
+gemini_client = None
+if GEMINI_API_KEY:
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ---------------- DB init + migration ----------------
 def init_db_and_migrate():
@@ -253,8 +255,8 @@ def fetch_url_text(url: str) -> str:
         logging.debug("fetch_url_text error: %s", e)
         return ""
 
-# ---------------- OpenAI (v1) helpers ----------------
-def classify_and_tag_with_openai(text: str) -> Dict[str, Any]:
+# ---------------- Gemini helpers ----------------
+def classify_and_tag_with_gemini(text: str) -> Dict[str, Any]:
     if not text:
         return {"category":"Other","tags":[],"entities":[],"summary":"No summary"}
     prompt = f"""You are an assistant that extracts structured metadata from a short note.
@@ -266,23 +268,44 @@ Return a JSON object only with these fields:
 
 Input:
 \"\"\"{text}\"\"\"
+
+Return ONLY the JSON object, no other text.
 """
     try:
-        resp = openai_client.chat.completions.create(
+        if not gemini_client:
+            raise Exception("Gemini client not configured")
+        response = gemini_client.models.generate_content(
             model=CLASSIFY_MODEL,
-            messages=[
-                {"role":"system","content":"You extract metadata."},
-                {"role":"user","content":prompt}
-            ],
-            temperature=0.0,
-            max_tokens=300,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=1024,
+            )
         )
-        out = ""
-        try:
-            out = resp.choices[0].message["content"]
-        except Exception:
-            out = getattr(resp.choices[0].message, "content", "") or str(resp)
-        out = (out or "").strip()
+        # Handle case where response.text is None (e.g., blocked content, empty response, or max tokens hit)
+        if response.text is None:
+            logging.warning("Gemini classify returned None response.text (finish_reason may be MAX_TOKENS), using fallback")
+            # Try to extract partial response from candidates
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                partial_text = response.candidates[0].content.parts[0].text
+                if partial_text:
+                    logging.info("Extracted partial response from candidates: %s", partial_text[:100])
+                    out = partial_text.strip()
+                else:
+                    return {"category":"Other","tags":[],"entities":[],"summary": text[:200] or "No summary"}
+            else:
+                return {"category":"Other","tags":[],"entities":[],"summary": text[:200] or "No summary"}
+        else:
+            out = response.text.strip()
+        # Remove markdown code blocks if present (```json ... ```)
+        if out.startswith("```"):
+            lines = out.split("\n")
+            # Remove first line (```json) and last line (```)
+            if lines[-1].strip() == "```":
+                lines = lines[1:-1]
+            else:
+                lines = lines[1:]
+            out = "\n".join(lines)
         try:
             data = json.loads(out)
         except Exception:
@@ -300,20 +323,51 @@ Input:
         logging.debug("AI classify: %s", data)
         return data
     except Exception:
-        logging.exception("OpenAI classify error")
+        logging.exception("Gemini classify error")
         return {"category":"Other","tags":[],"entities":[],"summary":"No summary"}
 
-def get_embedding_openai(text: str) -> List[float]:
+def get_embedding_gemini(text: str) -> List[float]:
+    """Get embedding vector for text using Gemini API.
+    
+    Falls back to a simple but meaningful text-based embedding if API fails.
+    The fallback uses character n-gram frequencies to create a sparse vector
+    that at least captures some textual similarity.
+    """
     if not text:
         return []
     try:
-        resp = openai_client.embeddings.create(model=EMBED_MODEL, input=text)
-        vec = resp.data[0].embedding
-        return vec
+        if not gemini_client:
+            raise Exception("Gemini client not configured")
+        result = gemini_client.models.embed_content(
+            model=EMBED_MODEL,
+            contents=text,
+        )
+        vec = result.embeddings[0].values
+        return list(vec)
     except Exception:
-        logging.exception("OpenAI embedding error")
-        h = abs(hash(text)) % (10**8)
-        return [((h >> (i*8)) & 255)/255.0 for i in range(128)]
+        logging.exception("Gemini embedding error, using fallback")
+        # Create a more meaningful fallback embedding using character n-grams
+        # This produces a 768-dim vector (matching Gemini text-embedding-004) based on text features
+        text_lower = text.lower()
+        vec = [0.0] * 768
+        # Use character bigrams and trigrams to populate the vector
+        for i in range(len(text_lower)):
+            # Unigrams
+            idx = ord(text_lower[i]) % 256
+            vec[idx] += 1.0
+            # Bigrams
+            if i + 1 < len(text_lower):
+                idx = (ord(text_lower[i]) * 31 + ord(text_lower[i+1])) % 256 + 256
+                vec[idx] += 1.0
+            # Trigrams
+            if i + 2 < len(text_lower):
+                idx = (ord(text_lower[i]) * 31 * 31 + ord(text_lower[i+1]) * 31 + ord(text_lower[i+2])) % 256 + 512
+                vec[idx] += 1.0
+        # Normalize the vector
+        norm = math.sqrt(sum(x*x for x in vec))
+        if norm > 0:
+            vec = [x / norm for x in vec]
+        return vec
 
 # ---------------- Embedding persistence ----------------
 def get_embedding_bytes(emb: List[float]) -> bytes:
@@ -356,10 +410,43 @@ def read_all_embeddings_from_db() -> List[Dict[str, Any]]:
             out.append({"id": rid, "emb": arr})
     return out
 
+# Target embedding dimension (text-embedding-004 produces 768 by default)
+TARGET_EMBEDDING_DIM = 768
+
+def normalize_embedding_dimension(emb: List[float], target_dim: int = TARGET_EMBEDDING_DIM) -> List[float]:
+    """Normalize embedding to target dimension.
+    
+    If embedding is longer, truncate to target dimension (safe for MRL-trained models 
+    where leading dimensions preserve most information).
+    If embedding is shorter, pad with zeros (not ideal but better than failing).
+    """
+    if not emb:
+        return []
+    if len(emb) == target_dim:
+        return emb
+    if len(emb) > target_dim:
+        # Truncate - MRL embeddings preserve info in leading dimensions
+        return emb[:target_dim]
+    else:
+        # Pad with zeros - not ideal but allows comparison
+        return emb + [0.0] * (target_dim - len(emb))
+
 # ---------------- Similarity & storage ----------------
 def cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Compute cosine similarity between two vectors.
+    
+    Handles mismatched dimensions by normalizing to the same length.
+    Returns 0.0 if vectors are empty or contain only zeros.
+    """
     if not a or not b:
         return 0.0
+    # Handle vectors of different lengths by normalizing to smaller dimension
+    # This allows comparing embeddings from different models/versions
+    if len(a) != len(b):
+        logging.debug("Cosine similarity: normalizing vector lengths (%d vs %d)", len(a), len(b))
+        min_dim = min(len(a), len(b))
+        a = a[:min_dim]
+        b = b[:min_dim]
     if NUMPY_AVAILABLE:
         a_np = np.array(a, dtype=float); b_np = np.array(b, dtype=float)
         la = np.linalg.norm(a_np); lb = np.linalg.norm(b_np)
@@ -367,32 +454,219 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
             return 0.0
         return float(np.dot(a_np, b_np) / (la*lb))
     else:
-        lena = math.sqrt(sum(x*x for x in a)) or 1.0
-        lenb = math.sqrt(sum(x*x for x in b)) or 1.0
+        lena = math.sqrt(sum(x*x for x in a))
+        lenb = math.sqrt(sum(x*x for x in b))
+        if lena == 0 or lenb == 0:
+            return 0.0
         s = sum(ai*bi for ai,bi in zip(a,b))
         return s / (lena * lenb)
+
+# Category affinity matrix - categories that are semantically related
+# Higher values mean stronger implicit relationship
+CATEGORY_AFFINITY = {
+    ("To-Do", "Idea"): 0.15,        # Ideas often become to-dos
+    ("Idea", "To-Do"): 0.15,
+    ("To-Do", "Code Snippet"): 0.10, # Code snippets support to-dos
+    ("Code Snippet", "To-Do"): 0.10,
+    ("Idea", "Code Snippet"): 0.12,  # Ideas implemented as code
+    ("Code Snippet", "Idea"): 0.12,
+    ("Link", "Idea"): 0.08,          # Links inspire ideas
+    ("Idea", "Link"): 0.08,
+    ("Quote", "Idea"): 0.10,         # Quotes inspire ideas
+    ("Idea", "Quote"): 0.10,
+    ("Contact", "To-Do"): 0.12,      # People assigned to tasks
+    ("To-Do", "Contact"): 0.12,
+}
+
+def compute_entity_overlap_score(entities1: List[str], entities2: List[str]) -> float:
+    """Compute semantic overlap between entity lists.
+    
+    Uses normalized Jaccard similarity with partial matching for similar entities.
+    """
+    if not entities1 or not entities2:
+        return 0.0
+    
+    # Normalize entities for comparison
+    norm1 = set(e.lower().strip() for e in entities1 if e)
+    norm2 = set(e.lower().strip() for e in entities2 if e)
+    
+    if not norm1 or not norm2:
+        return 0.0
+    
+    # Exact matches
+    exact_overlap = len(norm1 & norm2)
+    
+    # Partial matches (one entity contains another)
+    partial_overlap = 0
+    for e1 in norm1:
+        for e2 in norm2:
+            if e1 != e2 and (e1 in e2 or e2 in e1):
+                partial_overlap += 0.5
+    
+    total_overlap = exact_overlap + partial_overlap
+    union_size = len(norm1 | norm2)
+    
+    return min(total_overlap / union_size, 1.0) if union_size > 0 else 0.0
+
+def compute_tag_semantic_score(tags1: List[str], tags2: List[str]) -> float:
+    """Compute semantic similarity between tag lists.
+    
+    Goes beyond simple overlap to consider related tags.
+    """
+    if not tags1 or not tags2:
+        return 0.0
+    
+    norm1 = set(t.lower().strip() for t in tags1 if t)
+    norm2 = set(t.lower().strip() for t in tags2 if t)
+    
+    if not norm1 or not norm2:
+        return 0.0
+    
+    # Exact overlap (Jaccard)
+    intersection = len(norm1 & norm2)
+    union = len(norm1 | norm2)
+    jaccard = intersection / union if union > 0 else 0.0
+    
+    # Partial/substring matches (e.g., "python" matches "python3", "coding" matches "code")
+    partial_score = 0
+    matched = set()
+    for t1 in norm1:
+        for t2 in norm2:
+            if t1 != t2 and (t1, t2) not in matched and (t2, t1) not in matched:
+                if t1 in t2 or t2 in t1:
+                    partial_score += 0.3
+                    matched.add((t1, t2))
+                # Check for common root (first 4+ chars match)
+                elif len(t1) >= 4 and len(t2) >= 4 and t1[:4] == t2[:4]:
+                    partial_score += 0.2
+                    matched.add((t1, t2))
+    
+    partial_normalized = min(partial_score / max(len(norm1), len(norm2)), 0.5)
+    
+    return min(jaccard + partial_normalized, 1.0)
 
 def compute_related_with_scores(
     embedding: List[float],
     top_k: int = 10,
     exclude_id: str | None = None,
+    current_category: str | None = None,
+    current_tags: List[str] | None = None,
+    current_entities: List[str] | None = None,
 ) -> List[Dict[str, Any]]:
+    """Find semantically related notes using a hybrid scoring approach.
+    
+    Combines multiple signals for implicit, meaning-based relations:
+    1. Embedding similarity (semantic meaning from content)
+    2. Entity overlap (shared people, projects, topics)
+    3. Tag similarity (conceptual/topical overlap)
+    4. Category affinity (logical relationships between note types)
+    
+    This produces relations that are based on meaning, not just similar words.
+    """
     rows = read_all_embeddings_from_db()
-    if not rows:
+    if not rows or not embedding:
         return []
+    
+    # Fetch full metadata for semantic comparison
+    note_metadata = {}
+    with db_lock:
+        c = db_conn.cursor()
+        try:
+            c.execute("SELECT id, category, tags, entities, summary FROM notes")
+            for nid, cat, tags_json, entities_json, summary in c.fetchall():
+                tags = []
+                entities = []
+                if tags_json:
+                    try:
+                        tags = json.loads(tags_json)
+                    except Exception:
+                        pass
+                if entities_json:
+                    try:
+                        entities = json.loads(entities_json)
+                    except Exception:
+                        pass
+                note_metadata[nid] = {
+                    "category": cat or "",
+                    "tags": tags or [],
+                    "entities": entities or [],
+                    "summary": summary or ""
+                }
+        except Exception:
+            logging.exception("Error fetching note metadata for relations")
+    
     sims: List[Dict[str, Any]] = []
+    min_score = globals().get("RELATION_MIN_SCORE", 0.35)
+    
     for r in rows:
         try:
             rid = r.get("id")
             if exclude_id and rid == exclude_id:
                 continue
-            sc = cosine_similarity(embedding, r.get("emb") or r.get("embedding") or [])
-            if sc >= globals().get("RELATION_MIN_SCORE", 0.35):
-                sims.append({"id": rid, "score": float(sc)})
+            
+            other_emb = r.get("emb") or r.get("embedding") or []
+            if not other_emb:
+                continue
+            
+            meta = note_metadata.get(rid, {})
+            
+            # 1. Embedding similarity (primary semantic score) - weight: 0.85
+            # This is the TRUE semantic signal - captures meaning, not just words
+            emb_sim = cosine_similarity(embedding, other_emb)
+            
+            # 2. Category affinity - weight: 0.10
+            # Logical relationships between note types (ideas become todos, etc.)
+            cat_affinity = 0.0
+            if current_category and meta.get("category"):
+                cat_pair = (current_category, meta["category"])
+                cat_affinity = CATEGORY_AFFINITY.get(cat_pair, 0.0)
+                # Same category gets a small boost
+                if current_category == meta["category"]:
+                    cat_affinity = 0.08
+            
+            # 3. Entity overlap - weight: 0.05 (reduced - too word-based)
+            entity_score = 0.0
+            if current_entities:
+                entity_score = compute_entity_overlap_score(
+                    current_entities, 
+                    meta.get("entities", [])
+                )
+            
+            # Weighted combination - heavily favor semantic embeddings
+            final_score = (
+                0.85 * emb_sim +
+                0.10 * cat_affinity +
+                0.05 * entity_score
+            )
+            
+            # Small bonus for very strong embedding similarity (truly about same topic)
+            if emb_sim > 0.75:
+                final_score += 0.05
+            
+            final_score = min(final_score, 1.0)
+            
+            if final_score >= min_score:
+                sims.append({
+                    "id": rid, 
+                    "score": float(final_score),
+                    # Include breakdown for debugging/transparency
+                    "_debug": {
+                        "emb": round(emb_sim, 3),
+                        "entity": round(entity_score, 3),
+                        "cat": round(cat_affinity, 3)
+                    }
+                })
         except Exception:
+            logging.exception("Error computing similarity for note %s", r.get("id"))
             continue
+    
     sims.sort(key=lambda x: x["score"], reverse=True)
-    return sims[: min(top_k, globals().get("RELATED_MAX_PER_NOTE", 10))]
+    # Remove debug info before returning (it's just for development)
+    result = sims[: min(top_k, globals().get("RELATED_MAX_PER_NOTE", 5))]
+    for r in result:
+        r.pop("_debug", None)
+    return result
+
 def store_enriched_note(note: dict):
     with db_lock:
         c = db_conn.cursor()
@@ -482,9 +756,25 @@ def process_capture_object(obj: dict, *, store: bool = True) -> dict:
     if is_url(content):
         scraped = fetch_url_text(content)
     effective = scraped or content or ""
-    meta = classify_and_tag_with_openai(effective)
-    emb = get_embedding_openai(effective)
-    candidates = compute_related_with_scores(emb, top_k=10, exclude_id=obj.get("id"))
+    
+    # First classify to get semantic understanding (summary, category, etc.)
+    meta = classify_and_tag_with_gemini(effective)
+    
+    # Create embedding from SUMMARY + CONTENT for richer semantic meaning
+    # The summary captures the AI's understanding of the note's meaning
+    summary = meta.get("summary", "") or ""
+    semantic_text = f"{summary} {effective}".strip()
+    emb = get_embedding_gemini(semantic_text)
+    
+    # Pass category and entities for relation matching (tags removed - too word-based)
+    candidates = compute_related_with_scores(
+        emb, 
+        top_k=10, 
+        exclude_id=obj.get("id"),
+        current_category=meta.get("category"),
+        current_tags=[],  # Disabled tags - they're too word-based
+        current_entities=meta.get("entities", [])
+    )
     filtered = [r for r in candidates if r["id"] != nid]
     top_related = filtered[:5]
     enriched = {
@@ -730,7 +1020,13 @@ def enrich_missing_notes(batch_sleep=0.1):
         if not note:
             continue
         need = False
-        if not note.get("embedding"):
+        emb = note.get("embedding")
+        if not emb:
+            need = True
+        # Also check for embedding dimension mismatch (e.g., old 1536 vs new 768)
+        elif isinstance(emb, list) and len(emb) != TARGET_EMBEDDING_DIM:
+            logging.info("Note %s has embedding dim %d, expected %d - re-embedding", 
+                        nid, len(emb), TARGET_EMBEDDING_DIM)
             need = True
         if not note.get("summary") or note.get("summary","").strip()=="":
             need = True
@@ -773,7 +1069,7 @@ def recompute_links():
                 sims.append({"id": other_id, "score": score})
             except Exception:
                 continue
-        sims = [s for s in sims if s.get("score", 0.0) >= RELATED_MIN_SCORE]
+        sims = [s for s in sims if s.get("score", 0.0) >= RELATION_MIN_SCORE]
         sims.sort(key=lambda x: x["score"], reverse=True)
         top_related = sims[:RELATED_MAX_PER_NOTE]
         with db_lock:
@@ -1383,10 +1679,18 @@ if PYOBJC_AVAILABLE:
 
 # small formatting helpers
 def friendly_snippet(text: str, length: int = 120) -> str:
+    """Create a truncated snippet that respects word boundaries."""
     if not text:
         return ""
-    s = text.replace("\n", " ")
-    return (s[:length] + ("..." if len(s) > length else ""))
+    s = text.replace("\n", " ").strip()
+    if len(s) <= length:
+        return s
+    # Find the last space before the length limit to avoid cutting words
+    truncated = s[:length]
+    last_space = truncated.rfind(" ")
+    if last_space > length // 2:  # Only use word boundary if it's reasonable
+        truncated = truncated[:last_space]
+    return truncated.rstrip() + "..."
 
 def readable_related_list(related: List[Dict[str, Any]], max_items=3) -> List[str]:
     out = []
@@ -1425,16 +1729,17 @@ def build_one_line_summary(notes: List[dict]) -> str:
         key_phrases = []
         for n in recent:
             if n.get("summary"):
-                key_phrases.append(n["summary"][:50])
+                # Use full summary since it's already a concise one-sentence description
+                key_phrases.append(n["summary"].strip())
             else:
-                key_phrases.append((n.get("content","")[:50]).strip())
+                key_phrases.append(friendly_snippet(n.get("content",""), 80))
         key = "; ".join([k for k in key_phrases if k][:3])
         return f"{len(notes)} notes — focus on {top_cat}. Highlights: {key}"
     except Exception:
         return f"{len(notes)} notes captured."
 
-# ---------------- OpenAI-driven full summary ----------------
-def build_full_notes_summary_with_openai(notes: List[dict]) -> str:
+# ---------------- Gemini-driven full summary ----------------
+def build_full_notes_summary_with_gemini(notes: List[dict]) -> str:
     if not notes:
         return "No notes available."
     note_texts = []
@@ -1456,28 +1761,34 @@ Return a plain-text structured summary with these sections:
 2) Project or multi-step ideas (list briefly, with next 1-2 steps)
 3) Quick ideas & inspirations to remember
 4) Follow-ups / people / links to check
-5) One-sentence overall summary of the note collection
+5) Overall summary (1-2 sentences that specifically mention key people, projects, or themes from the notes — avoid generic phrases like "various topics" or "multiple items")
 
 Make bullet lists and keep items short (no more than 12 words each). If nothing fits a section write "None".
 """
     try:
-        resp = openai_client.chat.completions.create(
+        if not gemini_client:
+            raise Exception("Gemini client not configured")
+        response = gemini_client.models.generate_content(
             model=CLASSIFY_MODEL,
-            messages=[
-                {"role":"system","content":"You synthesize notes into actionable lists."},
-                {"role":"user","content":prompt}
-            ],
-            temperature=0.0,
-            max_tokens=600,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=2048,
+            )
         )
-        out = ""
-        try:
-            out = resp.choices[0].message["content"]
-        except Exception:
-            out = getattr(resp.choices[0].message, "content", "") or str(resp)
-        return (out or "").strip()
+        # Handle case where response.text is None (e.g., blocked content, empty response, or max tokens hit)
+        if response.text is None:
+            # Try to extract partial response from candidates
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                partial_text = response.candidates[0].content.parts[0].text
+                if partial_text:
+                    logging.info("Extracted partial summary from candidates")
+                    return partial_text.strip()
+            logging.warning("Gemini summary returned None response.text, using fallback")
+            raise Exception("Empty response from Gemini")
+        return response.text.strip()
     except Exception:
-        logging.exception("OpenAI summary generation failed")
+        logging.exception("Gemini summary generation failed")
         # fallback simple aggregator
         todos = []
         ideas = []
@@ -1624,7 +1935,7 @@ class AppGUI(rumps.App):
         # Optionally refresh the actionable summary asynchronously (heavier)
         def _recompute_actionable():
             try:
-                summary_text = build_full_notes_summary_with_openai(notes)
+                summary_text = build_full_notes_summary_with_gemini(notes)
             except Exception:
                 summary_text = None
             if summary_text:
@@ -1694,30 +2005,6 @@ class AppGUI(rumps.App):
             except Exception:
                 logging.exception("QuickCapture: process/store failed")
 
-        t = threading.Thread(target=_save_and_refresh, daemon=True)
-        t.start()
-        rumps.notification(APP_NAME, "Saved", text[:200])
-
-
-        def _save_and_refresh():
-            try:
-                logging.info("QuickCapture: processing/store start")
-                process_capture_object(obj, store=True)
-                logging.info("QuickCapture: processed/stored; refreshing UI")
-                self._refresh_all_notes_ui()
-            except Exception:
-                logging.exception("QuickCapture: process/store failed")
-
-        t = threading.Thread(target=_save_and_refresh, daemon=True)
-        t.start()
-        rumps.notification(APP_NAME, "Saved", text[:200])
-
-        def _save_and_refresh():
-            try:
-                process_capture_object(obj, store=True)
-                self._refresh_all_notes_ui()
-            except Exception:
-                logging.exception("QuickCapture: process/store failed")
         t = threading.Thread(target=_save_and_refresh, daemon=True)
         t.start()
         rumps.notification(APP_NAME, "Saved", text[:200])
@@ -1826,7 +2113,7 @@ class AppGUI(rumps.App):
         def summary_thread():
             try:
                 logging.info("Computing actionable summary for %d notes", len(notes))
-                summary_text = build_full_notes_summary_with_openai(notes)
+                summary_text = build_full_notes_summary_with_gemini(notes)
             except Exception:
                 logging.exception("Summary computation failed")
                 summary_text = "Could not compute summary right now."
@@ -1916,40 +2203,3 @@ if __name__ == "__main__":
     logging.info("Ambient Scratchpad started. Input: %s DB: %s", os.path.abspath(INPUT_STREAM), os.path.abspath(DB_FILE))
     logging.info("PyObjC available: %s  Pathway imported: %s  USE_PATHWAY_STREAM: %s", PYOBJC_AVAILABLE, PATHWAY_IMPORTED, USE_PATHWAY_STREAM)
     AppGUI().run()
-
-
-def compute_related_with_scores(
-    embedding: List[float],
-    top_k: int = 10,
-    exclude_id: str | None = None,
-    **kwargs,
-) -> List[Dict[str, Any]]:
-    rows = read_all_embeddings_from_db()
-    if not rows:
-        return []
-    import math
-    def _norm(v):
-        n = math.sqrt(sum((x*x for x in v))) or 1.0
-        return [x / n for x in v]
-    q = _norm(embedding or [])
-    if not q or all(v == 0 for v in q):
-        return []
-    sims: List[Dict[str, Any]] = []
-    for r in rows:
-        try:
-            rid = r.get('id')
-            if exclude_id and rid == exclude_id:
-                continue
-            v = _norm(r.get('embedding', []))
-            if not v or len(v) != len(q):
-                continue
-            s = sum(a*b for a, b in zip(q, v))
-            if s >= globals().get('RELATION_MIN_SCORE', 0.35):
-                sims.append({'id': rid, 'score': float(s)})
-        except Exception:
-            continue
-    if not sims:
-        return []
-    sims.sort(key=lambda x: x['score'], reverse=True)
-    cap = min(top_k, globals().get('RELATED_MAX_PER_NOTE', 10))
-    return sims[:cap]

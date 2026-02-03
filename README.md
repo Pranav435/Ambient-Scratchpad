@@ -2,90 +2,130 @@
 
 _A lightweight, AI-augmented note-taking app for macOS that lives in your menubar._
 
-Ambient Scratchpad is built for fast capture and intelligent recall. Every note is more than just text: it’s enriched with **AI classification, tags, summaries, embeddings, and related connections**.  
-What makes this unique is the **real-time streaming pipeline** — powered by [Pathway](https://pathway.com/) and [OpenAI](https://platform.openai.com/) — combined with a **native macOS experience**.
+Ambient Scratchpad is built for fast capture and intelligent recall. Every note is more than just text: it's enriched with **AI classification, tags, summaries, embeddings, and semantic connections**.
 
 ---
 
 ## ✨ Why Ambient Scratchpad?
 
-- 🖊️ **Quick capture** from anywhere in macOS, right from the menubar (`⌥+Space`).
+- 🖊️ **Quick capture** from anywhere in macOS, right from the menubar (`⌥+Space`)
 - 🧠 **AI enrichment**:
-  - Classifies each note (Idea, To-Do, Snippet, etc.)
-  - Adds tags and entities
-  - Generates a one-line summary
-  - Embeds notes into vector space for similarity search
-- 🔗 **Smart linking** between notes using cosine similarity on embeddings.
-- 📊 **Actionable full summaries**: automatically structured into to-dos, projects, inspirations, and follow-ups.
-- ⚡ **Pathway streaming engine**: real-time deduplication, ordering, and consistent enrichment pipeline.
-- 🍎 **Native macOS feel**:
-  - Menubar app via [rumps](https://github.com/jaredks/rumps)
-  - Scrollable, resizable windows via [PyObjC / AppKit](https://pypi.org/project/pyobjc/)
+  - Classifies each note (Idea, To-Do, Code Snippet, Link, Quote, Contact, Other)
+  - Extracts tags and named entities
+  - Generates a concise one-line summary
+  - Creates semantic embeddings for meaning-based search
+- 🔗 **Semantic linking** — notes are connected by *meaning*, not just keywords
+- 📊 **Actionable summaries** — automatically structured into to-dos, projects, inspirations, and follow-ups
+- 🍎 **Native macOS feel** via [rumps](https://github.com/jaredks/rumps) + [PyObjC](https://pypi.org/project/pyobjc/)
 
-Ambient Scratchpad’s USP:  
-👉 It’s not just “note storage”. It’s an **ambient intelligence layer** — your thoughts get **structured, connected, and actionable automatically**.
+**The key insight:**  
+👉 It's not just "note storage". It's an **ambient intelligence layer** — your thoughts get **structured, connected, and actionable automatically**.
 
 ---
 
 ## 🧩 How it Works
 
 ### Data Flow
+
 1. **Capture**  
-   - Notes are captured via the menubar Quick Capture (`⌥+Space`) or appended to `input_stream.jsonl`.
+   Notes are captured via the menubar Quick Capture (`⌥+Space`) or appended to `input_stream.jsonl`.
 
-2. **Streaming**  
-   - **Preferred:** Pathway watches the JSONL file as a **live table** with schema `(id, timestamp, content)`.
-   - It groups by note `id`, picks the **latest timestamp**, and ensures **only the newest version** of each note is processed.
-   - **Fallback:** If Pathway is not enabled, a simple polling loop tails the file and processes new lines.
+2. **Enrichment**  
+   Each note flows through `process_capture_object`:
+   - **Classification** — Gemini categorizes the note and extracts tags/entities
+   - **Summarization** — AI generates a one-sentence summary capturing the note's meaning
+   - **Embedding** — The summary + content is embedded into a 1536-dimensional vector space
+   - **Relation computation** — Semantic similarity finds related notes
 
-3. **Enrichment**  
-   Each latest note flows through `process_capture_object`:
-   - OpenAI `chat.completions` → classification, tags, entities, one-line summary
-   - OpenAI `embeddings` → vector representation for similarity search
-   - Related notes computed via cosine similarity
-
-4. **Storage**  
+3. **Storage**  
    Notes are persisted in `knowledge_base.db` (SQLite).  
-   Embeddings are stored as binary blobs, ensuring durability and reusability.  
-   Writes are **idempotent** (`INSERT OR REPLACE`), so replays/duplicates never corrupt the DB.
+   Embeddings are stored as binary blobs for efficient retrieval.  
+   Writes are **idempotent** (`INSERT OR REPLACE`), so duplicates never corrupt the DB.
 
-5. **Connections**  
-   Each note is linked to its most relevant neighbors (using a configurable similarity threshold).
+4. **Summarization**  
+   When you open "Show All Notes", the app builds a **structured actionable summary**:
+   - Top actionable To-Dos (with priority)
+   - Project ideas (with next steps)
+   - Quick inspirations to remember
+   - Follow-ups / people / links to check
+   - Specific overall summary mentioning key themes
 
-6. **Summarization**  
-   When you open “Show All Notes”, the app can build a **structured actionable summary**:
-   - To-Dos
-   - Project ideas
-   - Inspirations
-   - Follow-ups
-   - One-line overview
+---
 
-7. **Presentation**  
-   - Menubar menus for quick actions  
-   - Native PyObjC windows for large summaries, scrollable & resizable  
+## 🔗 How Note Relations Work
+
+Ambient Scratchpad uses a **semantic similarity system** to find related notes based on *meaning*, not just shared words.
+
+### The Algorithm
+
+Relations are computed using a **weighted hybrid scoring** approach:
+
+| Signal | Weight | Description |
+|--------|--------|-------------|
+| **Embedding Similarity** | 85% | Cosine similarity between Gemini embeddings — captures deep semantic meaning |
+| **Category Affinity** | 10% | Logical relationships between note types (see below) |
+| **Entity Overlap** | 5% | Shared named entities (people, projects, etc.) |
+
+### Why Embedding-First?
+
+Gemini's `text-embedding-004` model understands *meaning*:
+- "Buy groceries" relates to "Shopping list for dinner" (same intent)
+- "Meeting with John about the project" relates to "Project deadline next week" (same context)
+- But "IIT Ropar has pizza" won't relate to "Pizzaaaaa!" unless they share deeper meaning
+
+The embedding is created from **summary + content**, so the AI's understanding of the note's meaning is captured in the vector.
+
+### Category Affinity Matrix
+
+Certain note types have logical relationships:
+
+| Category Pair | Affinity | Reason |
+|--------------|----------|--------|
+| To-Do ↔ Idea | 15% | Ideas often become tasks |
+| Code Snippet ↔ Idea | 12% | Ideas get implemented as code |
+| Contact ↔ To-Do | 12% | People are assigned to tasks |
+| Link/Quote ↔ Idea | 8-10% | External sources inspire ideas |
+
+### Thresholds
+
+- **Minimum score**: 0.45 (fairly strict — only truly related notes connect)
+- **Max relations per note**: 5 (quality over quantity)
 
 ---
 
 ## ⚙️ Tech Stack
 
-- **Python 3.10+**
-- **[rumps](https://github.com/jaredks/rumps)** — lightweight macOS menubar apps
-- **[PyObjC / AppKit](https://pypi.org/project/pyobjc/)** — native scrollable windows
-- **[OpenAI](https://platform.openai.com/)** — classification, embeddings, summarization
-- **[Pathway](https://pathway.com/)** — real-time streaming pipeline (dedupe + consistency)
-- **SQLite** — persistent storage
-- **dotenv** — environment configuration
-- **requests + BeautifulSoup** — lightweight web scraping for links
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| **Streaming Engine** | [Pathway](https://pathway.com/) | Real-time data ingestion, deduplication, and model updates |
+| UI Framework | [rumps](https://github.com/jaredks/rumps) | macOS menubar app |
+| Native Windows | [PyObjC / AppKit](https://pypi.org/project/pyobjc/) | Scrollable, resizable windows |
+| AI | [Google Gemini API](https://ai.google.dev/) | Classification, embeddings, summarization |
+| Database | SQLite | Persistent note storage |
+| Config | python-dotenv | Environment variables |
+| Web Scraping | requests + BeautifulSoup | Link content extraction |
+| Math | NumPy | Fast vector operations |
+
+### 🌊 Pathway: Real-Time Streaming
+
+Pathway powers the **real-time note injection pipeline**:
+- Watches `input_stream.jsonl` for new notes
+- Provides **incremental processing** — only new/changed notes are processed
+- Handles **deduplication** with built-in idempotency
+- Enables **live model updates** as notes stream in
+
+This is the default and recommended mode. Set `USE_PATHWAY_STREAM=0` only for debugging.
 
 ---
 
 ## 🚀 Setup & Run
 
 ### 1. Clone
+
 ```bash
 git clone https://github.com/yourusername/ambient-scratchpad.git
 cd ambient-scratchpad
-````
+```
 
 ### 2. Install dependencies
 
@@ -95,19 +135,13 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Or manually:
-
-```bash
-pip install rumps openai python-dotenv pyobjc pathway requests beautifulsoup4 numpy
-```
-
 ### 3. Configure `.env`
 
 ```ini
-OPENAI_API_KEY=sk-...yourkey...
-OPENAI_CLASSIFY_MODEL=gpt-4o-mini
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-USE_PATHWAY_STREAM=1   # 1 = use Pathway (recommended), 0 = fallback polling
+GEMINI_API_KEY=...yourkey...
+GEMINI_CLASSIFY_MODEL=gemini-1.5-flash
+GEMINI_EMBEDDING_MODEL=models/text-embedding-004
+USE_PATHWAY_STREAM=1   # Pathway streaming enabled by default (set to 0 only for debugging)
 ```
 
 ### 4. Run
@@ -120,33 +154,16 @@ The app appears in your **macOS menubar**.
 
 ---
 
-## 📦 Packaging as a macOS `.app`
-
-1. Install py2app:
-
-   ```bash
-   pip install py2app
-   ```
-2. Add a `setup.py` (example in repo).
-3. Build:
-
-   ```bash
-   python setup.py py2app
-   ```
-4. Find the app in `dist/AmbientScratchpad.app`.
-
----
-
 ## 📂 Project Structure
 
 ```
-AmbientScratchpad/
-│
-├── main.py              # app logic & Pathway pipeline
-├── knowledge_base.db    # SQLite DB (auto-created)
-├── input_stream.jsonl   # raw captures (append-only)
-├── ambient.log          # log file
-├── requirements.txt
+Ambient-Scratchpad/
+├── main.py                    # Core app logic & processing pipeline
+├── test_ambient_scratchpad.py # Test suite (71 tests)
+├── knowledge_base.db          # SQLite DB (auto-created)
+├── input_stream.jsonl         # Raw captures (append-only)
+├── ambient.log                # Application logs
+├── requirements.txt           # Python dependencies
 └── README.md
 ```
 
@@ -154,45 +171,71 @@ AmbientScratchpad/
 
 ## 🔍 Example: Note Lifecycle
 
-1. Capture a note:
-
+1. **Capture** a note:
    ```
-   “Work on pitch deck by Friday”
+   "Discuss project timeline with Sarah on Monday"
    ```
-2. Pathway ensures only the **latest version** of this note is processed.
-3. OpenAI enriches it:
 
+2. **AI enriches** it:
    ```json
    {
      "category": "To-Do",
-     "tags": ["work", "deadline"],
-     "entities": ["Friday"],
-     "summary": "Task: finish pitch deck by Friday"
+     "tags": ["meeting", "project", "planning"],
+     "entities": ["Sarah", "Monday"],
+     "summary": "Schedule a meeting with Sarah to discuss project timeline."
    }
    ```
-4. Embedding links it to related notes.
-5. In “Show All Notes”, the full actionable summary appears.
+
+3. **Embedding** is created from summary + content, capturing the semantic meaning (meetings, planning, people).
+
+4. **Relations** are computed:
+   - Finds other notes about Sarah (entity overlap boost)
+   - Finds other project-related notes (embedding similarity)
+   - Connects to related Ideas (category affinity: To-Do ↔ Idea)
+
+5. **In "Show All Notes"**, the actionable summary appears with this note properly contextualized.
 
 ---
 
-## 🛠 Development Notes
+## 🧪 Testing
 
-* Quick Capture is always **non-blocking** (runs in threads).
-* Pathway streaming is **preferred**:
+Run the test suite:
 
-  * Deduplicates notes by `id`
-  * Processes only the latest version
-  * Provides crash-safe, idempotent state
-* Polling mode is kept as a fallback for environments without Pathway.
+```bash
+python -m pytest test_ambient_scratchpad.py -v
+```
+
+The test suite covers:
+- Cosine similarity calculations
+- Database operations
+- Embedding generation (including fallback)
+- Relation computation with semantic scoring
+- Summary generation
 
 ---
 
-## 🗺️ Roadmap
+## 🛠 Configuration
 
-* [ ] Export summaries to Markdown/HTML
-* [ ] Advanced search & filter by tags/entities
-* [ ] Sync across devices
-* [ ] Collaborative editing
+### Tuning Relations
+
+In `main.py`, adjust these constants:
+
+```python
+RELATION_MIN_SCORE = 0.45  # Higher = fewer, stricter relations
+RELATED_MAX_PER_NOTE = 5   # Maximum related notes per note
+```
+
+### Category Affinity
+
+Modify `CATEGORY_AFFINITY` dict to change how note types relate:
+
+```python
+CATEGORY_AFFINITY = {
+    ("To-Do", "Idea"): 0.15,
+    ("Code Snippet", "Idea"): 0.12,
+    # Add your own pairs...
+}
+```
 
 ---
 
