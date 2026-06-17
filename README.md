@@ -75,6 +75,33 @@ Gemini's `text-embedding-004` model understands *meaning*:
 
 The embedding is created from **summary + content**, so the AI's understanding of the note's meaning is captured in the vector.
 
+### The Meaning Gate
+
+Category affinity and entity overlap can only ever *re-rank or strengthen* a
+relation — they can never create one. Before any boost is applied, a candidate
+must clear a minimum **raw embedding cosine similarity** (`RELATION_MIN_EMBED_SIM`,
+default `0.55`). This guarantees every relation is grounded in genuine semantic
+similarity, so two notes that merely share a category or a keyword will **not**
+be linked unless their meanings are actually close.
+
+### Entity & Tag Matching is Token-Based, Not Substring-Based
+
+Entity and tag signals match on **whole words**, not raw substrings or shared
+prefixes. This removes spurious links created by spelling accidents:
+- ❌ `"Sam"` is no longer matched to `"Samsung"`
+- ❌ `"portal"` is no longer matched to `"porter"` (old 4-char-prefix hack)
+- ✅ `"John Smith"` still matches `"call John"` (shared whole word)
+
+### Optional: LLM Relationship Verification
+
+With `USE_LLM_RELATION_VERIFY=1`, borderline candidates that pass the meaning
+gate go through a single batched Gemini call that decides whether they are
+*genuinely related in meaning* (same topic/project/person, or a clear
+cause-effect / follow-up link) and returns a short reason. Confident matches
+(`emb_sim ≥ 0.80`) skip the call. The reason is stored and shown in the note
+detail view (`↳ same project deadline`). If the call fails, relations fall back
+gracefully to the embedding-only result.
+
 ### Category Affinity Matrix
 
 Certain note types have logical relationships:
@@ -88,7 +115,9 @@ Certain note types have logical relationships:
 
 ### Thresholds
 
-- **Minimum score**: 0.45 (fairly strict — only truly related notes connect)
+- **Minimum embedding similarity (the meaning gate)**: 0.55 — a relation must be grounded in semantic similarity before any boost applies
+- **Minimum blended score**: 0.45 (fairly strict — only truly related notes connect)
+- **Strong-match threshold**: 0.80 (skips optional LLM verification)
 - **Max relations per note**: 5 (quality over quantity)
 
 ---
@@ -141,7 +170,8 @@ pip install -r requirements.txt
 GEMINI_API_KEY=...yourkey...
 GEMINI_CLASSIFY_MODEL=gemini-1.5-flash
 GEMINI_EMBEDDING_MODEL=models/text-embedding-004
-USE_PATHWAY_STREAM=1   # Pathway streaming enabled by default (set to 0 only for debugging)
+USE_PATHWAY_STREAM=1        # Pathway streaming enabled by default (set to 0 only for debugging)
+USE_LLM_RELATION_VERIFY=0   # Set to 1 to verify/explain borderline relations with an LLM (adds one call per capture)
 ```
 
 ### 4. Run
@@ -221,8 +251,10 @@ The test suite covers:
 In `main.py`, adjust these constants:
 
 ```python
-RELATION_MIN_SCORE = 0.45  # Higher = fewer, stricter relations
-RELATED_MAX_PER_NOTE = 5   # Maximum related notes per note
+RELATION_MIN_SCORE = 0.45        # Higher = fewer, stricter blended-score relations
+RELATION_MIN_EMBED_SIM = 0.55    # The meaning gate: min raw embedding cosine before any boost
+RELATION_STRONG_EMBED_SIM = 0.80 # At/above this, a pair is a confident match (skips LLM verify)
+RELATED_MAX_PER_NOTE = 5         # Maximum related notes per note
 ```
 
 ### Category Affinity

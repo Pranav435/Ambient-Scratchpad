@@ -1,0 +1,7 @@
+{
+  "RELATION_MIN_SCORE": 0.45,
+  "RELATION_MIN_EMBED_SIM": 0.55,
+  "RELATED_MAX_PER_NOTE": 5,
+  "USE_LLM_RELATION_VERIFY": true,
+  "default_view": "bubbles"
+}
